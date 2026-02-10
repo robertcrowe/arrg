@@ -1,0 +1,12 @@
+[project]
+name = "arrg"
+version = "0.1.0"
+description = "Automated Research Report Generator - Multi-agent system for research and report generation"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "streamlit>=1.30.0",
+    "reportlab>=4.0.0",
+    "openai>=1.0.0",
+    "anthropic>=0.18.0",
+]
