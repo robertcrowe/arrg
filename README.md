@@ -1,6 +1,6 @@
 # ARRG - Automated Research Report Generator
 
-A multi-agent system for generating comprehensive research reports using specialized AI agents communicating via the A2A Protocol.
+A multi-agent system for generating comprehensive research reports using specialized AI agents communicating via the A2A Protocol and using MCP for tool-calling.
 
 ## Status
 
