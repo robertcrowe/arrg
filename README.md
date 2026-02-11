@@ -2,6 +2,11 @@
 
 A multi-agent system for generating comprehensive research reports using specialized AI agents communicating via the A2A Protocol.
 
+## Status
+
+ARRG is currently well along, but still a work in progress.  So far I have only tested with the Tetrate
+provider, using Claude Sonnet 4.5 and Claude Opus 4.6.
+
 ## Overview
 
 ARRG uses five specialized agents working together to produce high-quality research reports:
