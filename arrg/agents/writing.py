@@ -216,8 +216,9 @@ Key Findings:
 
 Create a well-structured, professional report with all sections."""
 
-        # Call LLM with higher token limit for comprehensive reports
-        llm_response = self.call_llm(user_prompt, system_prompt, max_tokens=16384)
+        # Call LLM with appropriate token limit for comprehensive reports
+        # Claude models typically support 8192 max_tokens for output
+        llm_response = self.call_llm(user_prompt, system_prompt, max_tokens=8192)
         
         # Parse actual LLM response
         parsed_response = self.parse_json_from_llm(llm_response)
@@ -424,8 +425,9 @@ Key Findings:
 
 Create an improved, well-structured report that addresses all QA feedback."""
 
-        # Call LLM with higher token limit for comprehensive revised reports
-        llm_response = self.call_llm(user_prompt, system_prompt, max_tokens=16384)
+        # Call LLM with appropriate token limit for comprehensive revised reports
+        # Claude models typically support 8192 max_tokens for output
+        llm_response = self.call_llm(user_prompt, system_prompt, max_tokens=8192)
         
         # Parse actual LLM response
         parsed_response = self.parse_json_from_llm(llm_response)

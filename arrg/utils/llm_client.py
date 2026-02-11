@@ -107,7 +107,32 @@ class LLMClient:
                 return self._mock_call(prompt, system_prompt)
                 
         except Exception as e:
-            self.logger.error(f"LLM call failed: {e}")
+            # Log the full error with stack trace for debugging
+            self.logger.error(f"LLM call failed with error: {e}", exc_info=True)
+            
+            # Check if this is a Tetrate error-in-200 or client error that should propagate
+            error_str = str(e).lower()
+            if any(keyword in error_str for keyword in [
+                'tetrate service error',  # Tetrate 503/500 errors
+                'tetrate api error',       # Generic Tetrate errors
+                'context length exceeded', # Context length errors
+                'authentication error',    # Auth errors
+                'rate limit exceeded',     # Rate limit errors
+                '400', 'bad request', 'invalid', 'max_tokens', 'context length'
+            ]):
+                # Don't fall back to mock for these errors - they need to be handled by caller
+                self.logger.error(
+                    f"API error detected (not falling back to mock): {e}\n"
+                    f"Request details: max_tokens={max_tokens}, model={self.model}, provider={self.provider}\n"
+                    f"This error should be handled by the calling code."
+                )
+                raise
+            
+            # For network/server errors only, fall back to mock mode with warning
+            self.logger.warning(
+                f"Network or server error, falling back to mock mode. "
+                f"Original error: {e}"
+            )
             return self._mock_call(prompt, system_prompt)
 
     def _call_openai(
@@ -136,6 +161,39 @@ class LLMClient:
             # Debug logging to understand response structure
             self.logger.debug(f"Response type: {type(response)}")
             self.logger.debug(f"Response: {response}")
+            
+            # CRITICAL: Tetrate can return errors in HTTP 200 responses
+            # Check for error object in the response (Tetrate-specific behavior)
+            if self.provider == "Tetrate":
+                # Check if response has an error attribute or is a dict with error
+                error_obj = None
+                if hasattr(response, 'error'):
+                    error_obj = response.error
+                elif isinstance(response, dict) and 'error' in response:
+                    error_obj = response['error']
+                
+                if error_obj:
+                    # Extract error details
+                    if isinstance(error_obj, dict):
+                        error_message = error_obj.get('message', 'Unknown Tetrate error')
+                        error_code = error_obj.get('code', 0)
+                    else:
+                        error_message = str(error_obj)
+                        error_code = 0
+                    
+                    self.logger.error(f"Tetrate returned error in 200 response: [{error_code}] {error_message}")
+                    
+                    # Handle specific error codes
+                    if error_code == 400 and 'maximum context length' in error_message.lower():
+                        raise ValueError(f"Context length exceeded: {error_message}")
+                    elif error_code in [401, 403]:
+                        raise ValueError(f"Authentication error: {error_message}")
+                    elif error_code == 429:
+                        raise ValueError(f"Rate limit exceeded: {error_message}")
+                    elif error_code in [500, 503]:
+                        raise ValueError(f"Tetrate service error: {error_message}")
+                    else:
+                        raise ValueError(f"Tetrate API error [{error_code}]: {error_message}")
             
             # Handle various response formats
             if isinstance(response, str):
