@@ -5,7 +5,7 @@ A multi-agent system for generating comprehensive research reports using special
 ## Status
 
 ARRG is currently well along, but still a work in progress.  So far I have only tested with the Tetrate
-provider, using Claude Sonnet 4.5 and Claude Opus 4.6.
+provider, using `claude-haiku-4-5`.
 
 ## Overview
 
