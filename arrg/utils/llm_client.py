@@ -38,10 +38,19 @@ class LLMClient:
                 
                 if self.provider == "Tetrate":
                     # Tetrate uses OpenAI-compatible API
-                    base_url = os.environ.get("TETRATE_API_BASE", "https://api.tetrate.ai/v1")
+                    # Note: Tetrate Agent Router Service requires the .router. subdomain
+                    base_url = os.environ.get("TETRATE_API_BASE", "https://api.router.tetrate.ai/v1")
+                    
+                    # Tetrate requires custom headers for proper routing
+                    default_headers = {
+                        "HTTP-Referer": "https://github.com/yourusername/arrg",  # Identifies the application
+                        "X-Title": "arrg"  # Application name
+                    }
+                    
                     self._client = OpenAI(
                         api_key=self.api_key,
                         base_url=base_url,
+                        default_headers=default_headers,
                     )
                 else:
                     self._client = OpenAI(api_key=self.api_key)
@@ -116,14 +125,82 @@ class LLMClient:
         
         messages.append({"role": "user", "content": prompt})
         
-        response = self._client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        
-        return response.choices[0].message.content
+        try:
+            response = self._client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            
+            # Debug logging to understand response structure
+            self.logger.debug(f"Response type: {type(response)}")
+            self.logger.debug(f"Response: {response}")
+            
+            # Handle various response formats
+            if isinstance(response, str):
+                # Handle raw string responses (malformed API responses)
+                if not response or response.strip() == "":
+                    error_msg = f"Received empty string response from {self.provider} API"
+                    if self.provider == "Tetrate":
+                        error_msg += (
+                            "\n\nTetrate API returned HTTP 200 with empty body. This indicates:\n"
+                            "1. The Tetrate service may be down or misconfigured\n"
+                            "2. The API endpoint might be incorrect\n"
+                            "3. The API key may not be authorized\n\n"
+                            "Recommendation: Try a different provider (OpenAI or Anthropic) or use mock mode.\n"
+                            "See TROUBLESHOOTING.md for details."
+                        )
+                    self.logger.error(error_msg)
+                    raise ValueError(error_msg)
+                self.logger.warning("Received raw string response instead of structured object")
+                return response
+            
+            # Check if response has the expected structure
+            if not hasattr(response, 'choices'):
+                error_msg = f"Response missing 'choices' attribute. Type: {type(response)}, Content: {response}"
+                if self.provider == "Tetrate":
+                    error_msg += (
+                        "\n\nTetrate API response is malformed (no 'choices' field). This indicates:\n"
+                        "1. The API returned empty or invalid JSON\n"
+                        "2. The service may be experiencing issues\n"
+                        "3. The endpoint may not be fully operational\n\n"
+                        "Recommendation: Try a different provider or check Tetrate service status.\n"
+                        "See TROUBLESHOOTING.md for details."
+                    )
+                self.logger.error(error_msg)
+                raise AttributeError(error_msg)
+            
+            if not response.choices or len(response.choices) == 0:
+                self.logger.error("Response has empty choices array")
+                raise ValueError("No choices in API response")
+            
+            # Extract content from the first choice
+            content = response.choices[0].message.content
+            
+            if not content:
+                self.logger.warning("Response content is empty")
+                return ""
+            
+            return content
+            
+        except AttributeError as e:
+            self.logger.error(f"AttributeError parsing response: {e}")
+            # Provide helpful context for Tetrate-specific issues
+            if self.provider == "Tetrate" and "'choices'" in str(e):
+                raise ValueError(
+                    f"Tetrate API is not responding correctly (empty response body).\n"
+                    f"The API returned HTTP 200 but with no content.\n\n"
+                    f"This is a known issue with the Tetrate service. Please:\n"
+                    f"1. Switch to OpenAI or Anthropic provider in the dashboard\n"
+                    f"2. Or use mock mode for testing\n"
+                    f"3. Or contact Tetrate support about API availability\n\n"
+                    f"Original error: {e}"
+                )
+            raise ValueError(f"Invalid API response structure from {self.provider}: {e}")
+        except Exception as e:
+            self.logger.error(f"Error in _call_openai: {e}", exc_info=True)
+            raise
 
     def _call_anthropic(
         self,

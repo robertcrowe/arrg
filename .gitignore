@@ -149,9 +149,12 @@ cython_debug/
 
 # Goose
 .goose/
+reprompt.txt
 
 # Workspace (ARRG specific - shared workspace for agents)
 workspace/
+test_workspace/
+logs/*
 
 # Report outputs
 *.pdf

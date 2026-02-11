@@ -11,10 +11,24 @@ from arrg.protocol import TaskStatus
 
 
 # Configure logging
+log_dir = Path("./logs")
+log_dir.mkdir(exist_ok=True)
+log_file = log_dir / f"arrg_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.DEBUG,  # Changed to DEBUG for better troubleshooting
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()
+    ]
 )
+
+# Log the file location for user reference
+logger = logging.getLogger(__name__)
+logger.info(f"=== ARRG Session Started ===")
+logger.info(f"Log file location: {log_file.absolute()}")
+logger.info(f"View logs with: tail -f {log_file.absolute()}")
 
 # Page configuration
 st.set_page_config(
@@ -419,6 +433,17 @@ def main():
     # Header
     st.title("📊 ARRG - Automated Research Report Generator")
     st.markdown("*Multi-agent system for generating comprehensive research reports*")
+    
+    # Show log file location prominently
+    log_files = list(Path("./logs").glob("*.log")) if Path("./logs").exists() else []
+    if log_files:
+        latest_log = max(log_files, key=lambda p: p.stat().st_mtime)
+        with st.expander("📋 System Logs", expanded=False):
+            st.success(f"**Log file location:** `{latest_log.absolute()}`")
+            st.code(f"tail -f {latest_log.absolute()}", language="bash")
+            st.markdown("View logs in real-time using the command above, or check the file directly.")
+    else:
+        st.warning("⚠️ No log files found. Logs will be created in `./logs/` when the application runs.")
     
     # Sidebar configuration
     config = render_sidebar()

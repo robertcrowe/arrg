@@ -103,13 +103,14 @@ class BaseAgent(ABC):
             self.stream_callback(f"[{self.agent_id}] {text}")
         self.logger.debug(text)
 
-    def call_llm(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+    def call_llm(self, prompt: str, system_prompt: Optional[str] = None, max_tokens: int = 4096) -> str:
         """
         Call the LLM with the given prompt.
         
         Args:
             prompt: User prompt
             system_prompt: Optional system prompt
+            max_tokens: Maximum tokens to generate (default: 4096)
             
         Returns:
             LLM response text
@@ -126,7 +127,7 @@ class BaseAgent(ABC):
                 api_key=self.api_key,
                 model=self.model,
             )
-            response = client.call(prompt, system_prompt)
+            response = client.call(prompt, system_prompt, max_tokens=max_tokens)
             return response
         except Exception as e:
             self.logger.error(f"LLM call failed: {e}")

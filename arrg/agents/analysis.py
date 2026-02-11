@@ -138,10 +138,41 @@ Output your analysis in JSON format with:
 """
 
         # Prepare research summary for prompt
-        findings_summary = "\n".join(
-            f"- {f['question']}: {f['answer']}"
-            for f in research_data.get("findings", [])
-        )
+        findings = research_data.get("findings", [])
+        
+        # Handle both list and dict formats for findings
+        if isinstance(findings, dict):
+            # If findings is a dict, format each key-value pair
+            findings_summary = "\n".join(
+                f"- {key}: {value.get('content', value) if isinstance(value, dict) else value}"
+                for key, value in findings.items()
+            )
+        elif isinstance(findings, list):
+            # If findings is a list, format each item
+            findings_summary = "\n".join(
+                f"- {f.get('question', 'Unknown')}: {f.get('answer', f.get('content', 'No answer'))}"
+                for f in findings
+            )
+        else:
+            findings_summary = str(findings)
+        
+        # Handle key_facts which could be a list, dict, or other format
+        key_facts = research_data.get('key_facts', [])
+        if isinstance(key_facts, dict):
+            key_facts_summary = "\n".join(f'- {k}: {v}' for k, v in key_facts.items())
+        elif isinstance(key_facts, list):
+            key_facts_summary = "\n".join(f'- {fact}' for fact in key_facts)
+        else:
+            key_facts_summary = str(key_facts)
+        
+        # Handle sources which could be a list, dict, or other format
+        sources = research_data.get('sources', [])
+        if isinstance(sources, dict):
+            source_count = len(sources)
+        elif isinstance(sources, list):
+            source_count = len(sources)
+        else:
+            source_count = 0
         
         user_prompt = f"""Analyze the following research data and provide insights:
 
@@ -149,9 +180,9 @@ Research Findings:
 {findings_summary}
 
 Key Facts:
-{chr(10).join(f'- {fact}' for fact in research_data.get('key_facts', []))}
+{key_facts_summary}
 
-Sources: {len(research_data.get('sources', []))} sources consulted
+Sources: {source_count} sources consulted
 
 Provide comprehensive analysis with insights, patterns, and recommendations."""
 

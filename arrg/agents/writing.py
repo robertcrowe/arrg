@@ -190,10 +190,18 @@ Output your report in JSON format with:
             f"{key}: {value}" for key, value in plan.get("outline", {}).items()
         )
         
-        insights_text = "\n".join(
-            f"- {insight['title']}: {insight['description']}"
-            for insight in analysis.get("insights", [])
-        )
+        # Handle different insight structures
+        insights = analysis.get("insights", [])
+        insights_list = []
+        for insight in insights:
+            if isinstance(insight, dict):
+                # Try different key combinations
+                title = insight.get("title") or insight.get("insight") or insight.get("name", "Insight")
+                description = insight.get("description") or insight.get("analysis") or insight.get("content", "")
+                insights_list.append(f"- {title}: {description}")
+            elif isinstance(insight, str):
+                insights_list.append(f"- {insight}")
+        insights_text = "\n".join(insights_list)
         
         user_prompt = f"""Write a comprehensive research report on: {plan.get('topic', 'the given topic')}
 
@@ -208,8 +216,8 @@ Key Findings:
 
 Create a well-structured, professional report with all sections."""
 
-        # Call LLM
-        llm_response = self.call_llm(user_prompt, system_prompt)
+        # Call LLM with higher token limit for comprehensive reports
+        llm_response = self.call_llm(user_prompt, system_prompt, max_tokens=16384)
         
         # Parse actual LLM response
         parsed_response = self.parse_json_from_llm(llm_response)
@@ -229,16 +237,47 @@ Create a well-structured, professional report with all sections."""
                 word_count = 0
                 
                 for section_key, section_value in plan.get("outline", {}).items():
-                    section_content = f"This section covers {section_key}. "
+                    # Extract title from nested structure if present
+                    if isinstance(section_value, dict) and 'title' in section_value:
+                        section_title = section_value.get('title', section_key)
+                        subsections = section_value.get('subsections', {})
+                    else:
+                        section_title = section_key
+                        subsections = section_value if isinstance(section_value, dict) else {}
+                    
+                    section_content = f"This section covers {section_title}. "
                     section_content += f"Based on our research and analysis, we found that... "
                     section_content += f"The key insights related to this area include... "
                     
                     sections.append({
-                        "title": section_key,
+                        "title": section_title,
                         "content": section_content,
-                        "subsections": section_value if isinstance(section_value, dict) else {},
+                        "subsections": subsections,
                     })
                     word_count += len(section_content.split())
+                
+                # Build full markdown text for incomplete response
+                markdown_sections = []
+                for section in sections:
+                    markdown_sections.append(f"## {section.get('title', 'Untitled Section')}\n\n{section.get('content', '')}\n")
+                    if section.get('subsections') and isinstance(section.get('subsections'), dict):
+                        for sub_key, sub_val in section.get('subsections', {}).items():
+                            markdown_sections.append(f"### {sub_key}\n\n{sub_val}\n")
+                
+                full_text = f"""# {title}
+
+## Executive Summary
+
+This comprehensive research report examines {plan.get('topic', 'the topic')}. Through systematic research and analysis, we have identified key insights and trends that inform our understanding of this area.
+
+{''.join(markdown_sections)}
+
+## Conclusion
+
+This report has provided a comprehensive analysis of {plan.get('topic', 'the topic')}. The key findings demonstrate significant insights that can inform future work in this area.
+"""
+                executive_summary = f"This comprehensive research report examines {plan.get('topic', 'the topic')}. Through systematic research and analysis, we have identified key insights and trends that inform our understanding of this area."
+                conclusion = f"This report has provided a comprehensive analysis of {plan.get('topic', 'the topic')}. The key findings demonstrate significant insights that can inform future work in this area."
         else:
             # Fallback if parsing fails
             self.stream_output("Warning: Failed to parse LLM response, using fallback structure")
@@ -246,25 +285,33 @@ Create a well-structured, professional report with all sections."""
             word_count = 0
             
             for section_key, section_value in plan.get("outline", {}).items():
-                section_content = f"This section covers {section_key}. "
+                # Extract title from nested structure if present
+                if isinstance(section_value, dict) and 'title' in section_value:
+                    section_title = section_value.get('title', section_key)
+                    subsections = section_value.get('subsections', {})
+                else:
+                    section_title = section_key
+                    subsections = section_value if isinstance(section_value, dict) else {}
+                
+                section_content = f"This section covers {section_title}. "
                 section_content += f"Based on our research and analysis, we found that... "
                 section_content += f"The key insights related to this area include... "
                 section_content += f"Furthermore, the evidence suggests... "
                 section_content += f"In conclusion for this section, we observe that..."
                 
                 sections.append({
-                    "title": section_key,
+                    "title": section_title,
                     "content": section_content,
-                    "subsections": section_value if isinstance(section_value, dict) else {},
+                    "subsections": subsections,
                 })
                 word_count += len(section_content.split())
             
             # Build full markdown text
             markdown_sections = []
             for section in sections:
-                markdown_sections.append(f"## {section['title']}\n\n{section['content']}\n")
-                if section['subsections']:
-                    for sub_key, sub_val in section['subsections'].items():
+                markdown_sections.append(f"## {section.get('title', 'Untitled Section')}\n\n{section.get('content', '')}\n")
+                if section.get('subsections') and isinstance(section.get('subsections'), dict):
+                    for sub_key, sub_val in section.get('subsections', {}).items():
                         markdown_sections.append(f"### {sub_key}\n\n{sub_val}\n")
             
             full_text = f"""# Research Report: {plan.get('topic', 'Research Topic')}
@@ -343,10 +390,18 @@ Output your revised report in JSON format with:
             f"{key}: {value}" for key, value in plan.get("outline", {}).items()
         )
         
-        insights_text = "\n".join(
-            f"- {insight['title']}: {insight['description']}"
-            for insight in analysis.get("insights", [])
-        )
+        # Handle different insight structures
+        insights = analysis.get("insights", [])
+        insights_list = []
+        for insight in insights:
+            if isinstance(insight, dict):
+                # Try different key combinations
+                title = insight.get("title") or insight.get("insight") or insight.get("name", "Insight")
+                description = insight.get("description") or insight.get("analysis") or insight.get("content", "")
+                insights_list.append(f"- {title}: {description}")
+            elif isinstance(insight, str):
+                insights_list.append(f"- {insight}")
+        insights_text = "\n".join(insights_list)
         
         user_prompt = f"""Revise the research report on: {plan.get('topic', 'the given topic')}
 
@@ -369,8 +424,8 @@ Key Findings:
 
 Create an improved, well-structured report that addresses all QA feedback."""
 
-        # Call LLM
-        llm_response = self.call_llm(user_prompt, system_prompt)
+        # Call LLM with higher token limit for comprehensive revised reports
+        llm_response = self.call_llm(user_prompt, system_prompt, max_tokens=16384)
         
         # Parse actual LLM response
         parsed_response = self.parse_json_from_llm(llm_response)
@@ -390,16 +445,47 @@ Create an improved, well-structured report that addresses all QA feedback."""
                 word_count = 0
                 
                 for section_key, section_value in plan.get("outline", {}).items():
-                    section_content = f"This section provides a comprehensive examination of {section_key}. "
+                    # Extract title from nested structure if present
+                    if isinstance(section_value, dict) and 'title' in section_value:
+                        section_title = section_value.get('title', section_key)
+                        subsections = section_value.get('subsections', {})
+                    else:
+                        section_title = section_key
+                        subsections = section_value if isinstance(section_value, dict) else {}
+                    
+                    section_content = f"This section provides a comprehensive examination of {section_title}. "
                     section_content += f"Based on extensive research and thorough analysis, our findings indicate... "
                     section_content += f"The key insights and patterns that emerged include... "
                     
                     sections.append({
-                        "title": section_key,
+                        "title": section_title,
                         "content": section_content,
-                        "subsections": section_value if isinstance(section_value, dict) else {},
+                        "subsections": subsections,
                     })
                     word_count += len(section_content.split())
+                
+                # Build full markdown text for incomplete revised response
+                markdown_sections = []
+                for section in sections:
+                    markdown_sections.append(f"## {section.get('title', 'Untitled Section')}\n\n{section.get('content', '')}\n")
+                    if section.get('subsections') and isinstance(section.get('subsections'), dict):
+                        for sub_key, sub_val in section.get('subsections', {}).items():
+                            markdown_sections.append(f"### {sub_key}\n\n{sub_val}\n")
+                
+                full_text = f"""# {title}
+
+## Executive Summary
+
+This comprehensive and thoroughly revised research report examines {plan.get('topic', 'the topic')}. Through systematic research, rigorous analysis, and careful revision based on quality assurance feedback, we have identified and expanded upon key insights and trends that inform our understanding of this area. This report addresses all quality concerns and provides enhanced depth and clarity.
+
+{''.join(markdown_sections)}
+
+## Conclusion
+
+This revised report has provided a comprehensive and enhanced analysis of {plan.get('topic', 'the topic')}. The key findings, now presented with greater detail and support, demonstrate significant insights that can inform future work in this area. All quality assurance feedback has been incorporated to ensure the highest standards.
+"""
+                executive_summary = f"This comprehensive and thoroughly revised research report examines {plan.get('topic', 'the topic')}. Through systematic research, rigorous analysis, and careful revision based on quality assurance feedback, we have identified and expanded upon key insights and trends that inform our understanding of this area."
+                conclusion = f"This revised report has provided a comprehensive and enhanced analysis of {plan.get('topic', 'the topic')}. The key findings, now presented with greater detail and support, demonstrate significant insights that can inform future work in this area."
         else:
             # Fallback if parsing fails
             self.stream_output("Warning: Failed to parse LLM response, using enhanced fallback structure")
@@ -407,8 +493,16 @@ Create an improved, well-structured report that addresses all QA feedback."""
             word_count = 0
             
             for section_key, section_value in plan.get("outline", {}).items():
+                # Extract title from nested structure if present
+                if isinstance(section_value, dict) and 'title' in section_value:
+                    section_title = section_value.get('title', section_key)
+                    subsections = section_value.get('subsections', {})
+                else:
+                    section_title = section_key
+                    subsections = section_value if isinstance(section_value, dict) else {}
+                
                 # Generate more substantial content for revision
-                section_content = f"This section provides a comprehensive examination of {section_key}. "
+                section_content = f"This section provides a comprehensive examination of {section_title}. "
                 section_content += f"Based on extensive research and thorough analysis, our findings indicate... "
                 section_content += f"The key insights and patterns that emerged from this investigation include... "
                 section_content += f"Furthermore, the evidence strongly suggests multiple important implications... "
@@ -416,18 +510,18 @@ Create an improved, well-structured report that addresses all QA feedback."""
                 section_content += f"In conclusion for this section, we observe significant correlations and trends that..."
                 
                 sections.append({
-                    "title": section_key,
+                    "title": section_title,
                     "content": section_content,
-                    "subsections": section_value if isinstance(section_value, dict) else {},
+                    "subsections": subsections,
                 })
                 word_count += len(section_content.split())
             
             # Build full markdown text
             markdown_sections = []
             for section in sections:
-                markdown_sections.append(f"## {section['title']}\n\n{section['content']}\n")
-                if section['subsections']:
-                    for sub_key, sub_val in section['subsections'].items():
+                markdown_sections.append(f"## {section.get('title', 'Untitled Section')}\n\n{section.get('content', '')}\n")
+                if section.get('subsections') and isinstance(section.get('subsections'), dict):
+                    for sub_key, sub_val in section.get('subsections', {}).items():
                         markdown_sections.append(f"### {sub_key}\n\n{sub_val}\n")
             
             full_text = f"""# Research Report: {plan.get('topic', 'Research Topic')}
