@@ -5,7 +5,7 @@ A multi-agent system for generating comprehensive research reports using special
 ## Status
 
 ARRG is currently well along, but still a work in progress.  So far I have only tested with the Tetrate
-provider, using `claude-haiku-4-5`.
+provider, using `claude-haiku-4-5`.  Example reports are in the `example_reports` directory.
 
 ## Overview
 
