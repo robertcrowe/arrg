@@ -103,14 +103,14 @@ class BaseAgent(ABC):
             self.stream_callback(f"[{self.agent_id}] {text}")
         self.logger.debug(text)
 
-    def call_llm(self, prompt: str, system_prompt: Optional[str] = None, max_tokens: int = 4096) -> str:
+    def call_llm(self, prompt: str, system_prompt: Optional[str] = None, max_tokens: int = 8192) -> str:
         """
         Call the LLM with the given prompt.
         
         Args:
             prompt: User prompt
             system_prompt: Optional system prompt
-            max_tokens: Maximum tokens to generate (default: 4096)
+            max_tokens: Maximum tokens to generate (default: 8192)
             
         Returns:
             LLM response text
