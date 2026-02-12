@@ -157,7 +157,6 @@ test_workspace/
 logs/*
 
 # Report outputs
-*.pdf
 reports/
 
 # API Keys and Secrets
