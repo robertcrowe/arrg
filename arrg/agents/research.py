@@ -100,7 +100,7 @@ class ResearchAgent(BaseAgent):
         self, research_questions: List[str], plan_reference: str = None
     ) -> Dict[str, Any]:
         """
-        Conduct research on the given questions.
+        Conduct research on the given questions using MCP tools.
         
         Args:
             research_questions: List of research questions
@@ -114,31 +114,61 @@ class ResearchAgent(BaseAgent):
         if plan_reference:
             plan = self.workspace.retrieve(plan_reference)
         
-        # Build prompt for LLM
-        system_prompt = """You are a Research Agent that gathers information on research questions.
-For each question, you should:
-1. Provide comprehensive information and key findings
-2. Cite relevant sources (even if simulated)
-3. Extract important facts and data points
-4. Note any conflicting information or gaps
+        # First, use MCP tools/call for web_search on each question
+        self.stream_output("Using MCP tools/call (web_search) to gather information...")
+        search_results = []
+        
+        for i, question in enumerate(research_questions):
+            self.stream_output(f"Searching: {question}")
+            
+            # Execute MCP tools/call per MCP 2025-11-25 spec
+            from arrg.mcp import MCPToolCall
+            tool_call = MCPToolCall(
+                name="web_search",
+                arguments={"query": question, "max_results": 5},
+                call_id=f"search_{i}",
+            )
+            
+            result = self.tool_registry.call_tool(tool_call)
+            if not result.is_error:
+                search_results.append({
+                    "question": question,
+                    "search_result": result.get_text(),
+                })
+                self.stream_output(f"✓ Found results for question {i+1}")
+            else:
+                error_text = result.get_text()
+                self.logger.warning(f"Search failed for question {i+1}: {error_text}")
+                search_results.append({
+                    "question": question,
+                    "search_result": f"[Search unavailable: {error_text}]",
+                })
+        
+        # Now synthesize search results with LLM
+        system_prompt = """You are a Research Agent that synthesizes search results into structured findings.
+Analyze the search results and create comprehensive research findings.
 
 Output your research in JSON format with:
-- findings: list of findings for each question
-- sources: list of sources consulted
+- findings: list of findings for each question (with question, answer, key_points, sources)
+- sources: list of all sources consulted
 - key_facts: important facts extracted
 - gaps: identified knowledge gaps
 """
 
-        questions_text = "\n".join(f"{i+1}. {q}" for i, q in enumerate(research_questions))
+        # Prepare search results for LLM
+        search_context = "\n\n".join(
+            f"Question {i+1}: {sr['question']}\nSearch Results:\n{sr['search_result']}"
+            for i, sr in enumerate(search_results)
+        )
         
-        user_prompt = f"""Conduct research on the following questions:
+        user_prompt = f"""Analyze these search results and provide structured research findings:
 
-{questions_text}
+{search_context}
 
-Provide comprehensive findings with sources and key facts for each question."""
+Synthesize the information into comprehensive findings with sources and key facts."""
 
-        # Call LLM
-        llm_response = self.call_llm(user_prompt, system_prompt)
+        # Call LLM with MCP tools enabled for potential follow-up searches
+        llm_response = self.call_llm(user_prompt, system_prompt, use_tools=True)
         
         # Parse actual LLM response
         parsed_response = self.parse_json_from_llm(llm_response)

@@ -1,14 +1,26 @@
-"""LLM Client for making calls to various providers."""
+"""
+LLM Client for making calls to various providers.
+
+Supports tool-calling via MCP (Model Context Protocol) 2025-11-25:
+- call() returns plain text (simple prompts, no tool inspection)
+- call_with_messages() returns structured responses including tool_calls
+  for the agentic tool-call execution loop in BaseAgent.call_llm()
+"""
 
 import os
 from typing import Optional, Dict, Any, List
 import logging
+import json
 
 
 class LLMClient:
     """
     Client for making LLM calls to various providers.
     Supports OpenAI, Anthropic, and compatible APIs (like Tetrate).
+    
+    Tool integration follows MCP 2025-11-25: tool schemas are passed as
+    OpenAI function-calling format (bridged from MCP tools/list), and
+    tool_calls in responses trigger MCP tools/call execution in the agent.
     """
 
     def __init__(self, provider: str, api_key: str, model: str):
@@ -81,9 +93,10 @@ class LLMClient:
         temperature: float = 0.7,
         max_tokens: int = 8192,
         stream: bool = False,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
-        Make an LLM call.
+        Make an LLM call with optional MCP tool support.
         
         Args:
             prompt: User prompt
@@ -91,6 +104,7 @@ class LLMClient:
             temperature: Sampling temperature
             max_tokens: Maximum tokens to generate
             stream: Whether to stream the response
+            tools: Optional MCP tools for function calling
             
         Returns:
             LLM response text
@@ -100,9 +114,9 @@ class LLMClient:
         
         try:
             if self.provider in ["OpenAI", "Tetrate", "Local"]:
-                return self._call_openai(prompt, system_prompt, temperature, max_tokens)
+                return self._call_openai(prompt, system_prompt, temperature, max_tokens, tools)
             elif self.provider == "Anthropic":
-                return self._call_anthropic(prompt, system_prompt, temperature, max_tokens)
+                return self._call_anthropic(prompt, system_prompt, temperature, max_tokens, tools)
             else:
                 return self._mock_call(prompt, system_prompt)
                 
@@ -135,12 +149,250 @@ class LLMClient:
             )
             return self._mock_call(prompt, system_prompt)
 
+    def call_with_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: float = 0.7,
+        max_tokens: int = 8192,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Call the LLM with a full message history, returning structured output.
+        
+        This is the core method for the MCP tool-call execution loop.
+        Returns a dict with 'content' (text) and optionally 'tool_calls'
+        (list of tool call dicts in OpenAI format).
+        
+        When 'tool_calls' is present, the caller (BaseAgent.call_llm) should
+        execute each via MCP tools/call and append tool results as tool
+        messages before calling again.
+        
+        Args:
+            messages: Full conversation history (system, user, assistant, tool messages)
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens to generate
+            tools: Optional MCP tools in OpenAI function-calling format
+            
+        Returns:
+            Dict with keys:
+              - content: str (text response, may be empty if only tool_calls)
+              - tool_calls: Optional[List[Dict]] (tool calls in OpenAI format)
+        """
+        if not self._client:
+            return self._mock_call_with_messages(messages, tools)
+        
+        try:
+            if self.provider in ["OpenAI", "Tetrate", "Local"]:
+                return self._call_openai_with_messages(messages, temperature, max_tokens, tools)
+            elif self.provider == "Anthropic":
+                return self._call_anthropic_with_messages(messages, temperature, max_tokens, tools)
+            else:
+                return self._mock_call_with_messages(messages, tools)
+        except Exception as e:
+            self.logger.error(f"call_with_messages failed: {e}", exc_info=True)
+            error_str = str(e).lower()
+            if any(kw in error_str for kw in [
+                'tetrate service error', 'tetrate api error',
+                'context length exceeded', 'authentication error',
+                'rate limit exceeded', '400', 'bad request', 'invalid',
+                'max_tokens', 'context length',
+            ]):
+                raise
+            self.logger.warning(f"Falling back to mock: {e}")
+            return self._mock_call_with_messages(messages, tools)
+
+    def _call_openai_with_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Call OpenAI-compatible API with full message history.
+        Returns structured response with content and optional tool_calls.
+        """
+        api_kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        
+        if tools:
+            api_kwargs["tools"] = tools
+            api_kwargs["tool_choice"] = "auto"
+        
+        response = self._client.chat.completions.create(**api_kwargs)
+        
+        # Tetrate error-in-200 check
+        if self.provider == "Tetrate":
+            self._check_tetrate_error(response)
+        
+        # Validate response structure
+        if isinstance(response, str):
+            return {"content": response, "tool_calls": None}
+        
+        if not hasattr(response, 'choices') or not response.choices:
+            raise ValueError(f"Invalid response from {self.provider}: no choices")
+        
+        message = response.choices[0].message
+        content = message.content or ""
+        
+        # Check for tool calls
+        tool_calls = None
+        if hasattr(message, 'tool_calls') and message.tool_calls:
+            tool_calls = []
+            for tc in message.tool_calls:
+                tool_calls.append({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                })
+        
+        return {"content": content, "tool_calls": tool_calls}
+
+    def _call_anthropic_with_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Call Anthropic API with full message history.
+        Returns structured response with content and optional tool_calls.
+        """
+        # Separate system prompt from messages
+        system = None
+        api_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system = msg["content"]
+            elif msg["role"] == "tool":
+                # Anthropic expects tool results in a specific format
+                api_messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": msg.get("tool_call_id", ""),
+                            "content": msg.get("content", ""),
+                        }
+                    ],
+                })
+            else:
+                api_messages.append(msg)
+        
+        kwargs = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": api_messages,
+        }
+        if system:
+            kwargs["system"] = system
+        if tools:
+            # Convert OpenAI tool format to Anthropic format
+            anthropic_tools = []
+            for tool in tools:
+                func = tool.get("function", {})
+                anthropic_tools.append({
+                    "name": func.get("name", ""),
+                    "description": func.get("description", ""),
+                    "input_schema": func.get("parameters", {}),
+                })
+            kwargs["tools"] = anthropic_tools
+        
+        response = self._client.messages.create(**kwargs)
+        
+        content = ""
+        tool_calls = None
+        
+        for block in response.content:
+            if block.type == "text":
+                content += block.text
+            elif block.type == "tool_use":
+                if tool_calls is None:
+                    tool_calls = []
+                tool_calls.append({
+                    "id": block.id,
+                    "type": "function",
+                    "function": {
+                        "name": block.name,
+                        "arguments": json.dumps(block.input),
+                    },
+                })
+        
+        return {"content": content, "tool_calls": tool_calls}
+
+    def _mock_call_with_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Mock call_with_messages for testing without a real API.
+        Returns text content (no tool_calls) based on the last user message.
+        """
+        self.logger.info("Using mock call_with_messages response")
+        
+        # Find the last user message for context
+        last_user = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                last_user = msg.get("content", "")
+                break
+        
+        # Find system prompt
+        system = None
+        for msg in messages:
+            if msg.get("role") == "system":
+                system = msg.get("content", "")
+                break
+        
+        text = self._mock_call(last_user, system)
+        return {"content": text, "tool_calls": None}
+
+    def _check_tetrate_error(self, response: Any) -> None:
+        """Check for Tetrate error-in-200-response pattern."""
+        error_obj = None
+        if hasattr(response, 'error'):
+            error_obj = response.error
+        elif isinstance(response, dict) and 'error' in response:
+            error_obj = response['error']
+        
+        if error_obj:
+            if isinstance(error_obj, dict):
+                error_message = error_obj.get('message', 'Unknown Tetrate error')
+                error_code = error_obj.get('code', 0)
+            else:
+                error_message = str(error_obj)
+                error_code = 0
+            
+            self.logger.error(f"Tetrate error in 200: [{error_code}] {error_message}")
+            
+            if error_code == 400 and 'maximum context length' in error_message.lower():
+                raise ValueError(f"Context length exceeded: {error_message}")
+            elif error_code in [401, 403]:
+                raise ValueError(f"Authentication error: {error_message}")
+            elif error_code == 429:
+                raise ValueError(f"Rate limit exceeded: {error_message}")
+            elif error_code in [500, 503]:
+                raise ValueError(f"Tetrate service error: {error_message}")
+            else:
+                raise ValueError(f"Tetrate API error [{error_code}]: {error_message}")
+
     def _call_openai(
         self,
         prompt: str,
         system_prompt: Optional[str],
         temperature: float,
         max_tokens: int,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Make a call to OpenAI-compatible API."""
         messages = []
@@ -151,12 +403,20 @@ class LLMClient:
         messages.append({"role": "user", "content": prompt})
         
         try:
-            response = self._client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            # Build API call kwargs
+            api_kwargs = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            
+            # Add tools if provided
+            if tools:
+                api_kwargs["tools"] = tools
+                api_kwargs["tool_choice"] = "auto"
+            
+            response = self._client.chat.completions.create(**api_kwargs)
             
             # Debug logging to understand response structure
             self.logger.debug(f"Response type: {type(response)}")
@@ -266,6 +526,7 @@ class LLMClient:
         system_prompt: Optional[str],
         temperature: float,
         max_tokens: int,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Make a call to Anthropic API."""
         kwargs = {
@@ -277,6 +538,10 @@ class LLMClient:
         
         if system_prompt:
             kwargs["system"] = system_prompt
+        
+        # Add tools if provided (Anthropic uses same format as OpenAI)
+        if tools:
+            kwargs["tools"] = tools
         
         response = self._client.messages.create(**kwargs)
         

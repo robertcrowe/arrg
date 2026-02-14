@@ -12,6 +12,7 @@ from arrg.agents import (
     QAAgent,
 )
 from arrg.protocol import A2AMessage, MessageType, SharedWorkspace, TaskStatus
+from arrg.a2a import Task, TaskStatus as A2ATaskStatus
 
 
 class Orchestrator:
@@ -117,6 +118,9 @@ class Orchestrator:
         
         # A2A message history for logging
         self.message_history: list[A2AMessage] = []
+        
+        # A2A Task tracking
+        self.tasks: Dict[str, Task] = {}
         
         # QA revision tracking
         self.max_qa_retries = 2
@@ -228,112 +232,228 @@ class Orchestrator:
             }
 
     def _execute_planning(self, topic: str, requirements: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the planning phase."""
+        """Execute the planning phase using A2A Task."""
+        # Create A2A Task
+        task = Task(
+            task_id=f"planning_{len(self.tasks)}",
+            description=f"Create research plan for topic: {topic}",
+            assigned_agent="planning",
+            metadata={"topic": topic, "requirements": requirements}
+        )
+        task.update_status(A2ATaskStatus.IN_PROGRESS)
+        self.tasks[task.task_id] = task
+        
+        # Create A2A message for task request
         message = A2AMessage(
             message_type=MessageType.TASK_REQUEST,
             sender="orchestrator",
             receiver="planning",
             payload={
+                "task_id": task.task_id,
                 "topic": topic,
                 "requirements": requirements,
             },
         )
         
         self.message_history.append(message)
-        response = self.agents["planning"].process_message(message)
-        self.message_history.append(response)
+        self.logger.info(f"Created task {task.task_id} for planning agent")
         
-        if response.message_type == MessageType.ERROR:
-            raise RuntimeError(f"Planning failed: {response.payload.get('error')}")
-        
-        return response.payload
+        try:
+            response = self.agents["planning"].process_message(message)
+            self.message_history.append(response)
+            
+            if response.message_type == MessageType.ERROR:
+                task.update_status(A2ATaskStatus.FAILED, error=response.payload.get("error"))
+                raise RuntimeError(f"Planning failed: {response.payload.get('error')}")
+            
+            # Mark task as complete
+            task.set_result(response.payload)
+            task.update_status(A2ATaskStatus.COMPLETED)
+            return response.payload
+            
+        except Exception as e:
+            task.update_status(A2ATaskStatus.FAILED, error=str(e))
+            raise
 
     def _execute_research(self, plan_result: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the research phase."""
+        """Execute the research phase using A2A Task."""
+        # Create A2A Task
+        task = Task(
+            task_id=f"research_{len(self.tasks)}",
+            description="Conduct research on questions from plan",
+            assigned_agent="research",
+            metadata={
+                "research_questions": plan_result["research_questions"],
+                "plan_reference": plan_result["plan_reference"]
+            }
+        )
+        task.update_status(A2ATaskStatus.IN_PROGRESS)
+        self.tasks[task.task_id] = task
+        
         message = A2AMessage(
             message_type=MessageType.TASK_REQUEST,
             sender="orchestrator",
             receiver="research",
             payload={
+                "task_id": task.task_id,
                 "research_questions": plan_result["research_questions"],
                 "plan_reference": plan_result["plan_reference"],
             },
         )
         
         self.message_history.append(message)
-        response = self.agents["research"].process_message(message)
-        self.message_history.append(response)
+        self.logger.info(f"Created task {task.task_id} for research agent")
         
-        if response.message_type == MessageType.ERROR:
-            raise RuntimeError(f"Research failed: {response.payload.get('error')}")
-        
-        return response.payload
+        try:
+            response = self.agents["research"].process_message(message)
+            self.message_history.append(response)
+            
+            if response.message_type == MessageType.ERROR:
+                task.update_status(A2ATaskStatus.FAILED, error=response.payload.get("error"))
+                raise RuntimeError(f"Research failed: {response.payload.get('error')}")
+            
+            task.set_result(response.payload)
+            task.update_status(A2ATaskStatus.COMPLETED)
+            return response.payload
+            
+        except Exception as e:
+            task.update_status(A2ATaskStatus.FAILED, error=str(e))
+            raise
 
     def _execute_analysis(
         self, research_result: Dict[str, Any], plan_result: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Execute the analysis phase."""
+        """Execute the analysis phase using A2A Task."""
+        # Create A2A Task
+        task = Task(
+            task_id=f"analysis_{len(self.tasks)}",
+            description="Analyze research data and synthesize insights",
+            assigned_agent="analysis",
+            metadata={
+                "data_reference": research_result["data_reference"],
+                "plan_reference": plan_result["plan_reference"]
+            }
+        )
+        task.update_status(A2ATaskStatus.IN_PROGRESS)
+        self.tasks[task.task_id] = task
+        
         message = A2AMessage(
             message_type=MessageType.TASK_REQUEST,
             sender="orchestrator",
             receiver="analysis",
             payload={
+                "task_id": task.task_id,
                 "data_reference": research_result["data_reference"],
                 "plan_reference": plan_result["plan_reference"],
             },
         )
         
         self.message_history.append(message)
-        response = self.agents["analysis"].process_message(message)
-        self.message_history.append(response)
+        self.logger.info(f"Created task {task.task_id} for analysis agent")
         
-        if response.message_type == MessageType.ERROR:
-            raise RuntimeError(f"Analysis failed: {response.payload.get('error')}")
-        
-        return response.payload
+        try:
+            response = self.agents["analysis"].process_message(message)
+            self.message_history.append(response)
+            
+            if response.message_type == MessageType.ERROR:
+                task.update_status(A2ATaskStatus.FAILED, error=response.payload.get("error"))
+                raise RuntimeError(f"Analysis failed: {response.payload.get('error')}")
+            
+            task.set_result(response.payload)
+            task.update_status(A2ATaskStatus.COMPLETED)
+            return response.payload
+            
+        except Exception as e:
+            task.update_status(A2ATaskStatus.FAILED, error=str(e))
+            raise
 
     def _execute_writing(
         self, analysis_result: Dict[str, Any], plan_result: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Execute the writing phase."""
+        """Execute the writing phase using A2A Task."""
+        # Create A2A Task
+        task = Task(
+            task_id=f"writing_{len(self.tasks)}",
+            description="Write comprehensive research report",
+            assigned_agent="writing",
+            metadata={
+                "analysis_reference": analysis_result["analysis_reference"],
+                "plan_reference": plan_result["plan_reference"]
+            }
+        )
+        task.update_status(A2ATaskStatus.IN_PROGRESS)
+        self.tasks[task.task_id] = task
+        
         message = A2AMessage(
             message_type=MessageType.TASK_REQUEST,
             sender="orchestrator",
             receiver="writing",
             payload={
+                "task_id": task.task_id,
                 "analysis_reference": analysis_result["analysis_reference"],
                 "plan_reference": plan_result["plan_reference"],
             },
         )
         
         self.message_history.append(message)
-        response = self.agents["writing"].process_message(message)
-        self.message_history.append(response)
+        self.logger.info(f"Created task {task.task_id} for writing agent")
         
-        if response.message_type == MessageType.ERROR:
-            raise RuntimeError(f"Writing failed: {response.payload.get('error')}")
-        
-        return response.payload
+        try:
+            response = self.agents["writing"].process_message(message)
+            self.message_history.append(response)
+            
+            if response.message_type == MessageType.ERROR:
+                task.update_status(A2ATaskStatus.FAILED, error=response.payload.get("error"))
+                raise RuntimeError(f"Writing failed: {response.payload.get('error')}")
+            
+            task.set_result(response.payload)
+            task.update_status(A2ATaskStatus.COMPLETED)
+            return response.payload
+            
+        except Exception as e:
+            task.update_status(A2ATaskStatus.FAILED, error=str(e))
+            raise
 
     def _execute_qa(self, writing_result: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute the QA phase."""
+        """Execute the QA phase using A2A Task."""
+        # Create A2A Task
+        task = Task(
+            task_id=f"qa_{len(self.tasks)}",
+            description="Quality assurance review of report",
+            assigned_agent="qa",
+            metadata={"report_reference": writing_result["report_reference"]}
+        )
+        task.update_status(A2ATaskStatus.IN_PROGRESS)
+        self.tasks[task.task_id] = task
+        
         message = A2AMessage(
             message_type=MessageType.TASK_REQUEST,
             sender="orchestrator",
             receiver="qa",
             payload={
+                "task_id": task.task_id,
                 "report_reference": writing_result["report_reference"],
             },
         )
         
         self.message_history.append(message)
-        response = self.agents["qa"].process_message(message)
-        self.message_history.append(response)
+        self.logger.info(f"Created task {task.task_id} for qa agent")
         
-        if response.message_type == MessageType.ERROR:
-            raise RuntimeError(f"QA failed: {response.payload.get('error')}")
-        
-        return response.payload
+        try:
+            response = self.agents["qa"].process_message(message)
+            self.message_history.append(response)
+            
+            if response.message_type == MessageType.ERROR:
+                task.update_status(A2ATaskStatus.FAILED, error=response.payload.get("error"))
+                raise RuntimeError(f"QA failed: {response.payload.get('error')}")
+            
+            task.set_result(response.payload)
+            task.update_status(A2ATaskStatus.COMPLETED)
+            return response.payload
+            
+        except Exception as e:
+            task.update_status(A2ATaskStatus.FAILED, error=str(e))
+            raise
 
     def _execute_writing_revision(
         self, 

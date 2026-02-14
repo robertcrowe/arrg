@@ -1,12 +1,19 @@
-"""Base agent classes and interfaces."""
+"""
+Base agent classes and interfaces.
+
+Supports A2A messaging with MCP (Model Context Protocol) 2025-11-25 tool integration.
+All tool-calling flows through the MCP protocol using tools/list and tools/call.
+"""
 
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, List
 import logging
 import json
 import re
 
 from arrg.protocol import A2AMessage, MessageType, SharedWorkspace
+from arrg.a2a import AgentCard, AgentCapability
+from arrg.mcp import MCPToolRegistry, MCPToolCall, MCPToolResult, TextContent, get_tool_registry
 
 
 class BaseAgent(ABC):
@@ -44,6 +51,35 @@ class BaseAgent(ABC):
         
         # Message history for this agent
         self.message_history: list[A2AMessage] = []
+        
+        # Initialize MCP tool registry
+        self.tool_registry = get_tool_registry()
+        
+        # Create AgentCard for A2A protocol
+        capabilities = self.get_capabilities()
+        
+        # Map agent type to AgentCapability enum
+        agent_type_map = {
+            "planning": AgentCapability.PLANNING,
+            "research": AgentCapability.RESEARCH,
+            "analysis": AgentCapability.ANALYSIS,
+            "writing": AgentCapability.WRITING,
+            "qa": AgentCapability.QA,
+        }
+        
+        # Get the primary capability based on agent_type
+        agent_type = capabilities.get("agent_type", agent_id)
+        primary_capability = agent_type_map.get(agent_type, AgentCapability.DATA_PROCESSING)
+        
+        self.agent_card = AgentCard(
+            agent_id=agent_id,
+            name=agent_id.title() + " Agent",
+            description=capabilities.get("description", f"Agent for {agent_id}"),
+            capabilities=[primary_capability],
+            supported_message_types=["task", "query", "response"],
+            metadata=capabilities,
+            version="1.0.0"
+        )
 
     @abstractmethod
     def get_capabilities(self) -> Dict[str, Any]:
@@ -103,32 +139,147 @@ class BaseAgent(ABC):
             self.stream_callback(f"[{self.agent_id}] {text}")
         self.logger.debug(text)
 
-    def call_llm(self, prompt: str, system_prompt: Optional[str] = None, max_tokens: int = 8192) -> str:
+    def call_llm(
+        self, 
+        prompt: str, 
+        system_prompt: Optional[str] = None, 
+        max_tokens: int = 8192,
+        use_tools: bool = False,
+        max_tool_rounds: int = 5,
+    ) -> str:
         """
-        Call the LLM with the given prompt.
+        Call the LLM with the given prompt, optionally with MCP tools.
+        
+        When use_tools=True, this implements an agentic tool-call execution loop:
+        1. Send prompt + MCP tool schemas (via tools/list) to the LLM
+        2. If LLM responds with tool_calls, execute each via MCP tools/call
+        3. Feed MCP tool results back to the LLM as tool messages
+        4. Repeat until LLM responds with text content (no more tool_calls)
+        
+        All tool definitions come from MCPToolRegistry.get_tools_for_llm()
+        (MCP tools/list → OpenAI format bridge).  All tool execution goes
+        through MCPToolRegistry.call_tool() (MCP tools/call).
         
         Args:
             prompt: User prompt
             system_prompt: Optional system prompt
             max_tokens: Maximum tokens to generate (default: 8192)
+            use_tools: Whether to include MCP tools in the call
+            max_tool_rounds: Maximum rounds of tool-call → result loops (default: 5)
             
         Returns:
-            LLM response text
+            LLM response text (final text after all tool calls are resolved)
         """
         from arrg.utils.llm_client import LLMClient
         
-        self.stream_output(f"Calling LLM ({self.model}) with max_tokens={max_tokens}...")
-        self.logger.info(f"LLM Call with max_tokens={max_tokens}: {prompt[:100]}...")
+        tools_info = " with MCP tools" if use_tools else ""
+        self.stream_output(f"Calling LLM ({self.model}){tools_info} max_tokens={max_tokens}...")
+        self.logger.info(f"LLM Call with max_tokens={max_tokens}{tools_info}: {prompt[:100]}...")
         
-        # Create LLM client and make the call
         try:
             client = LLMClient(
                 provider=self.provider_endpoint,
                 api_key=self.api_key,
                 model=self.model,
             )
-            response = client.call(prompt, system_prompt, max_tokens=max_tokens)
-            return response
+            
+            # Get MCP tool schemas for LLM (MCP tools/list → OpenAI format)
+            tools = None
+            if use_tools:
+                tools = self.tool_registry.get_tools_for_llm()
+                tool_names = [t['function']['name'] for t in tools]
+                self.logger.info(f"MCP tools/list returned {len(tools)} tools: {tool_names}")
+            
+            if not use_tools:
+                # Simple call without tools
+                response = client.call(
+                    prompt, 
+                    system_prompt, 
+                    max_tokens=max_tokens,
+                    tools=None,
+                )
+                return response
+            
+            # --- Agentic tool-call execution loop ---
+            # Build conversation messages for multi-turn tool use
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            
+            for round_num in range(max_tool_rounds):
+                # Call LLM with tools and full message history
+                response = client.call_with_messages(
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    tools=tools,
+                )
+                
+                # Check if LLM returned tool calls
+                if not response.get("tool_calls"):
+                    # No tool calls — LLM is done, return text content
+                    text = response.get("content", "")
+                    self.logger.info(f"LLM finished after {round_num} tool-call round(s)")
+                    return text
+                
+                # LLM wants to call tools — execute each via MCP tools/call
+                tool_calls = response["tool_calls"]
+                assistant_content = response.get("content", None)
+                
+                # Add the assistant's message (with tool_calls) to history
+                assistant_msg: Dict[str, Any] = {"role": "assistant", "tool_calls": tool_calls}
+                if assistant_content:
+                    assistant_msg["content"] = assistant_content
+                messages.append(assistant_msg)
+                
+                self.stream_output(f"LLM requested {len(tool_calls)} MCP tool call(s) (round {round_num + 1})")
+                
+                for tc in tool_calls:
+                    tc_id = tc.get("id", f"call_{round_num}")
+                    func = tc.get("function", {})
+                    tool_name = func.get("name", "unknown")
+                    
+                    # Parse arguments (LLM may return as JSON string)
+                    raw_args = func.get("arguments", "{}")
+                    if isinstance(raw_args, str):
+                        try:
+                            tool_args = json.loads(raw_args)
+                        except json.JSONDecodeError:
+                            tool_args = {}
+                    else:
+                        tool_args = raw_args
+                    
+                    self.logger.info(f"MCP tools/call: {tool_name}({tool_args})")
+                    self.stream_output(f"  → MCP tools/call: {tool_name}")
+                    
+                    # Execute via MCP tools/call
+                    mcp_call = MCPToolCall(
+                        name=tool_name,
+                        arguments=tool_args,
+                        call_id=tc_id,
+                    )
+                    mcp_result: MCPToolResult = self.tool_registry.call_tool(mcp_call)
+                    
+                    result_text = mcp_result.get_text()
+                    if mcp_result.is_error:
+                        self.stream_output(f"  ✗ Tool error: {result_text[:100]}")
+                    else:
+                        self.stream_output(f"  ✓ Tool returned {len(result_text)} chars")
+                    
+                    # Add MCP tool result to conversation as a tool message
+                    # (bridges MCP result back into LLM conversation format)
+                    messages.append(mcp_result.to_llm_tool_result())
+            
+            # Exhausted tool rounds — make one final call without tools
+            self.logger.warning(f"Exhausted {max_tool_rounds} tool-call rounds, making final call without tools")
+            self.stream_output(f"Tool loop limit reached ({max_tool_rounds} rounds), getting final response...")
+            response = client.call_with_messages(
+                messages=messages,
+                max_tokens=max_tokens,
+                tools=None,
+            )
+            return response.get("content", "")
+            
         except Exception as e:
             self.logger.error(f"LLM call failed: {e}")
             return f"[Error: {str(e)}]"
