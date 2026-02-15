@@ -85,7 +85,7 @@ def test_writing_agent_revision():
     print("\n🧪 Testing writing agent revision capability...")
     
     from arrg.agents.writing import WritingAgent
-    from arrg.protocol import A2AMessage, MessageType, SharedWorkspace
+    from arrg.protocol import SharedWorkspace
     
     workspace_dir = Path("./test_workspace")
     workspace_dir.mkdir(exist_ok=True)
@@ -99,8 +99,9 @@ def test_writing_agent_revision():
         provider_endpoint="test-provider",
     )
     
-    # Check for _revise_report method
+    # Check for _revise_report method (A2A Protocol - process_task is the entry point)
     assert hasattr(agent, '_revise_report'), "Writing agent missing _revise_report method"
+    assert hasattr(agent, 'process_task'), "Writing agent missing process_task method"
     
     print("✅ Writing agent revision: CAPABLE")
     return True

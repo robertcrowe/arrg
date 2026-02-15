@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 
 from arrg.core import Orchestrator
-from arrg.protocol import TaskStatus
+from arrg.a2a import TaskState
 
 
 # Configure logging
@@ -53,11 +53,11 @@ def init_session_state():
         st.session_state.qa_results = None
     if "progress" not in st.session_state:
         st.session_state.progress = {
-            "planning": TaskStatus.PENDING,
-            "research": TaskStatus.PENDING,
-            "analysis": TaskStatus.PENDING,
-            "writing": TaskStatus.PENDING,
-            "qa": TaskStatus.PENDING,
+            "planning": TaskState.SUBMITTED.value,
+            "research": TaskState.SUBMITTED.value,
+            "analysis": TaskState.SUBMITTED.value,
+            "writing": TaskState.SUBMITTED.value,
+            "qa": TaskState.SUBMITTED.value,
         }
 
 
@@ -202,13 +202,13 @@ def render_progress_tracker(progress: Dict[str, Any]):
     
     for col, phase, name in zip(cols, phases, phase_names):
         with col:
-            status = progress.get(phase, TaskStatus.PENDING)
-            
-            if status == TaskStatus.COMPLETE:
+            status = progress.get(phase, TaskState.SUBMITTED.value)
+            # Status values are A2A TaskState strings
+            if status == TaskState.COMPLETED.value:
                 st.success(f"✅ {name}")
-            elif status == TaskStatus.IN_PROGRESS:
+            elif status == TaskState.WORKING.value:
                 st.info(f"🔄 {name}")
-            elif status == TaskStatus.ERROR:
+            elif status == TaskState.FAILED.value:
                 st.error(f"❌ {name}")
             else:
                 st.text(f"⏳ {name}")

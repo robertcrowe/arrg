@@ -1,14 +1,29 @@
-"""Research Agent - Gathers information on research questions."""
+"""Research Agent - Gathers information on research questions.
+
+Communicates via A2A Protocol v1.0 Tasks and Messages.
+Uses MCP tools/call for web_search (MCP is complementary to A2A).
+"""
 
 from typing import Any, Dict, List
 from arrg.agents.base import BaseAgent
-from arrg.protocol import A2AMessage, MessageType
+from arrg.a2a import (
+    Task,
+    TaskState,
+    Message,
+    MessageRole,
+    TextPart,
+    DataPart,
+    Artifact,
+)
 
 
 class ResearchAgent(BaseAgent):
     """
     Research Agent gathers information on research questions.
-    Simulates web search and information gathering.
+    Uses MCP web_search tool for information gathering.
+
+    A2A Protocol: Receives a Task with research questions in the user Message's
+    DataPart, produces an Artifact containing research findings.
     """
 
     def get_capabilities(self) -> Dict[str, Any]:
@@ -26,86 +41,63 @@ class ResearchAgent(BaseAgent):
             "outputs": ["research_data", "sources", "findings"],
         }
 
-    def process_message(self, message: A2AMessage) -> A2AMessage:
+    def process_task(self, task: Task, message: Message) -> Task:
         """
-        Process an incoming message and gather research data.
-        
+        Process an A2A Task to gather research data.
+
         Args:
-            message: Incoming A2A message
-            
+            task: A2A Task (in SUBMITTED state)
+            message: User Message containing research questions
+
         Returns:
-            Response message with research data
+            Updated Task with research data Artifact (COMPLETED or FAILED)
         """
         self.receive_message(message)
-        
-        if message.message_type == MessageType.TASK_REQUEST:
-            try:
-                # Extract research questions from payload
-                research_questions = message.payload.get("research_questions", [])
-                plan_reference = message.payload.get("plan_reference")
-                
-                self.stream_output(f"Conducting research on {len(research_questions)} questions")
-                
-                # Gather research data
-                research_data = self._conduct_research(research_questions, plan_reference)
-                
-                # Store research data in workspace
-                data_key = f"research_data_{message.message_id}"
-                self.workspace.store(data_key, research_data, persist=True)
-                
-                self.stream_output("Research completed successfully")
-                
-                # Create response with reference to research data
-                response = self.create_task_complete_message(
-                    receiver=message.sender,
-                    result={
-                        "data_reference": data_key,
-                        "summary": research_data["summary"],
-                        "source_count": len(research_data["sources"]),
-                    },
-                    in_reply_to=message.message_id,
-                )
-                
-                self.send_message(response)
-                return response
-                
-            except Exception as e:
-                self.stream_output(f"Error conducting research: {str(e)}")
-                error_msg = self.create_error_message(
-                    receiver=message.sender,
-                    error=str(e),
-                    in_reply_to=message.message_id,
-                )
-                self.send_message(error_msg)
-                return error_msg
-        
-        elif message.message_type == MessageType.CAPABILITY_QUERY:
-            response = A2AMessage(
-                message_type=MessageType.CAPABILITY_RESPONSE,
-                sender=self.agent_id,
-                receiver=message.sender,
-                payload=self.get_capabilities(),
-                in_reply_to=message.message_id,
+        task.update_state(TaskState.WORKING, message="Conducting research")
+        task.add_to_history(message)
+
+        try:
+            # Extract research questions from message DataPart
+            data = message.get_data() or {}
+            research_questions = data.get("research_questions", [])
+            plan_reference = data.get("plan_reference")
+
+            self.stream_output(f"Conducting research on {len(research_questions)} questions")
+
+            # Gather research data
+            research_data = self._conduct_research(research_questions, plan_reference)
+
+            # Store research data in workspace
+            data_key = f"research_data_{task.id}"
+            self.workspace.store(data_key, research_data, persist=True)
+
+            self.stream_output("Research completed successfully")
+
+            # Complete the task with result
+            result = {
+                "data_reference": data_key,
+                "summary": research_data["summary"],
+                "source_count": len(research_data["sources"]),
+            }
+            return self.create_completed_task(
+                task, result_data=result,
+                result_text="Research completed successfully",
             )
-            self.send_message(response)
-            return response
-        
-        return self.create_error_message(
-            receiver=message.sender,
-            error=f"Unsupported message type: {message.message_type}",
-            in_reply_to=message.message_id,
-        )
+
+        except Exception as e:
+            self.stream_output(f"Error conducting research: {str(e)}")
+            return self.create_failed_task(task, error=str(e))
 
     def _conduct_research(
         self, research_questions: List[str], plan_reference: str = None
     ) -> Dict[str, Any]:
         """
         Conduct research on the given questions using MCP tools.
-        
+
         Args:
             research_questions: List of research questions
             plan_reference: Optional reference to research plan
-            
+
         Returns:
             Research data dictionary
         """
@@ -113,14 +105,14 @@ class ResearchAgent(BaseAgent):
         plan = None
         if plan_reference:
             plan = self.workspace.retrieve(plan_reference)
-        
+
         # First, use MCP tools/call for web_search on each question
         self.stream_output("Using MCP tools/call (web_search) to gather information...")
         search_results = []
-        
+
         for i, question in enumerate(research_questions):
             self.stream_output(f"Searching: {question}")
-            
+
             # Execute MCP tools/call per MCP 2025-11-25 spec
             from arrg.mcp import MCPToolCall
             tool_call = MCPToolCall(
@@ -128,7 +120,7 @@ class ResearchAgent(BaseAgent):
                 arguments={"query": question, "max_results": 5},
                 call_id=f"search_{i}",
             )
-            
+
             result = self.tool_registry.call_tool(tool_call)
             if not result.is_error:
                 search_results.append({
@@ -143,7 +135,7 @@ class ResearchAgent(BaseAgent):
                     "question": question,
                     "search_result": f"[Search unavailable: {error_text}]",
                 })
-        
+
         # Now synthesize search results with LLM
         system_prompt = """You are a Research Agent that synthesizes search results into structured findings.
 Analyze the search results and create comprehensive research findings.
@@ -160,7 +152,7 @@ Output your research in JSON format with:
             f"Question {i+1}: {sr['question']}\nSearch Results:\n{sr['search_result']}"
             for i, sr in enumerate(search_results)
         )
-        
+
         user_prompt = f"""Analyze these search results and provide structured research findings:
 
 {search_context}
@@ -169,17 +161,17 @@ Synthesize the information into comprehensive findings with sources and key fact
 
         # Call LLM with MCP tools enabled for potential follow-up searches
         llm_response = self.call_llm(user_prompt, system_prompt, use_tools=True)
-        
+
         # Parse actual LLM response
         parsed_response = self.parse_json_from_llm(llm_response)
-        
+
         if parsed_response and isinstance(parsed_response, dict):
             # Use LLM-generated content
             findings = parsed_response.get("findings", [])
             sources = parsed_response.get("sources", [])
             key_facts = parsed_response.get("key_facts", [])
             gaps = parsed_response.get("gaps", [])
-            
+
             # Validate that we got meaningful content
             if not findings:
                 self.stream_output("Warning: LLM response incomplete, using fallback structure")
@@ -227,7 +219,7 @@ Synthesize the information into comprehensive findings with sources and key fact
                 "Area needing more investigation 1",
                 "Area needing more investigation 2",
             ]
-        
+
         research_data = {
             "questions": research_questions,
             "findings": findings,
@@ -237,5 +229,5 @@ Synthesize the information into comprehensive findings with sources and key fact
             "summary": f"Completed research on {len(research_questions)} questions with {len(findings)} detailed findings",
             "llm_response": llm_response,
         }
-        
+
         return research_data

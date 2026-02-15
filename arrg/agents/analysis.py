@@ -1,14 +1,28 @@
-"""Analysis Agent - Synthesizes research data into insights."""
+"""Analysis Agent - Synthesizes research data into insights.
+
+Communicates via A2A Protocol v1.0 Tasks and Messages.
+"""
 
 from typing import Any, Dict
 from arrg.agents.base import BaseAgent
-from arrg.protocol import A2AMessage, MessageType
+from arrg.a2a import (
+    Task,
+    TaskState,
+    Message,
+    MessageRole,
+    TextPart,
+    DataPart,
+    Artifact,
+)
 
 
 class AnalysisAgent(BaseAgent):
     """
     Analysis Agent synthesizes research data into insights.
     Identifies patterns, trends, and critical findings.
+
+    A2A Protocol: Receives a Task with data_reference in the user Message's
+    DataPart, produces an Artifact containing analysis insights.
     """
 
     def get_capabilities(self) -> Dict[str, Any]:
@@ -27,95 +41,72 @@ class AnalysisAgent(BaseAgent):
             "outputs": ["analysis", "insights", "recommendations"],
         }
 
-    def process_message(self, message: A2AMessage) -> A2AMessage:
+    def process_task(self, task: Task, message: Message) -> Task:
         """
-        Process an incoming message and analyze research data.
-        
+        Process an A2A Task to analyze research data.
+
         Args:
-            message: Incoming A2A message
-            
+            task: A2A Task (in SUBMITTED state)
+            message: User Message containing data references
+
         Returns:
-            Response message with analysis
+            Updated Task with analysis Artifact (COMPLETED or FAILED)
         """
         self.receive_message(message)
-        
-        if message.message_type == MessageType.TASK_REQUEST:
-            try:
-                # Extract data reference from payload
-                data_reference = message.payload.get("data_reference")
-                plan_reference = message.payload.get("plan_reference")
-                
-                if not data_reference:
-                    raise ValueError("No data_reference provided")
-                
-                self.stream_output("Analyzing research data...")
-                
-                # Retrieve research data from workspace
-                research_data = self.workspace.retrieve(data_reference)
-                plan = None
-                if plan_reference:
-                    plan = self.workspace.retrieve(plan_reference)
-                
-                # Perform analysis
-                analysis = self._analyze_data(research_data, plan)
-                
-                # Store analysis in workspace
-                analysis_key = f"analysis_{message.message_id}"
-                self.workspace.store(analysis_key, analysis, persist=True)
-                
-                self.stream_output("Analysis completed successfully")
-                
-                # Create response with reference to analysis
-                response = self.create_task_complete_message(
-                    receiver=message.sender,
-                    result={
-                        "analysis_reference": analysis_key,
-                        "insights_count": len(analysis["insights"]),
-                        "key_findings": analysis["key_findings"][:3],  # Top 3 findings
-                    },
-                    in_reply_to=message.message_id,
-                )
-                
-                self.send_message(response)
-                return response
-                
-            except Exception as e:
-                self.stream_output(f"Error analyzing data: {str(e)}")
-                error_msg = self.create_error_message(
-                    receiver=message.sender,
-                    error=str(e),
-                    in_reply_to=message.message_id,
-                )
-                self.send_message(error_msg)
-                return error_msg
-        
-        elif message.message_type == MessageType.CAPABILITY_QUERY:
-            response = A2AMessage(
-                message_type=MessageType.CAPABILITY_RESPONSE,
-                sender=self.agent_id,
-                receiver=message.sender,
-                payload=self.get_capabilities(),
-                in_reply_to=message.message_id,
+        task.update_state(TaskState.WORKING, message="Analyzing research data")
+        task.add_to_history(message)
+
+        try:
+            # Extract references from message DataPart
+            data = message.get_data() or {}
+            data_reference = data.get("data_reference")
+            plan_reference = data.get("plan_reference")
+
+            if not data_reference:
+                raise ValueError("No data_reference provided")
+
+            self.stream_output("Analyzing research data...")
+
+            # Retrieve research data from workspace
+            research_data = self.workspace.retrieve(data_reference)
+            plan = None
+            if plan_reference:
+                plan = self.workspace.retrieve(plan_reference)
+
+            # Perform analysis
+            analysis = self._analyze_data(research_data, plan)
+
+            # Store analysis in workspace
+            analysis_key = f"analysis_{task.id}"
+            self.workspace.store(analysis_key, analysis, persist=True)
+
+            self.stream_output("Analysis completed successfully")
+
+            # Complete the task with result
+            result = {
+                "analysis_reference": analysis_key,
+                "insights_count": len(analysis["insights"]),
+                "key_findings": analysis["key_findings"][:3],  # Top 3 findings
+            }
+            return self.create_completed_task(
+                task, result_data=result,
+                result_text="Analysis completed successfully",
             )
-            self.send_message(response)
-            return response
-        
-        return self.create_error_message(
-            receiver=message.sender,
-            error=f"Unsupported message type: {message.message_type}",
-            in_reply_to=message.message_id,
-        )
+
+        except Exception as e:
+            self.stream_output(f"Error analyzing data: {str(e)}")
+            return self.create_failed_task(task, error=str(e))
 
     def _analyze_data(
         self, research_data: Dict[str, Any], plan: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """
         Analyze research data to generate insights.
-        
+
         Args:
             research_data: Research data to analyze
             plan: Optional research plan
-            
+
         Returns:
             Analysis dictionary with insights
         """
@@ -139,23 +130,21 @@ Output your analysis in JSON format with:
 
         # Prepare research summary for prompt
         findings = research_data.get("findings", [])
-        
+
         # Handle both list and dict formats for findings
         if isinstance(findings, dict):
-            # If findings is a dict, format each key-value pair
             findings_summary = "\n".join(
                 f"- {key}: {value.get('content', value) if isinstance(value, dict) else value}"
                 for key, value in findings.items()
             )
         elif isinstance(findings, list):
-            # If findings is a list, format each item
             findings_summary = "\n".join(
                 f"- {f.get('question', 'Unknown')}: {f.get('answer', f.get('content', 'No answer'))}"
                 for f in findings
             )
         else:
             findings_summary = str(findings)
-        
+
         # Handle key_facts which could be a list, dict, or other format
         key_facts = research_data.get('key_facts', [])
         if isinstance(key_facts, dict):
@@ -164,7 +153,7 @@ Output your analysis in JSON format with:
             key_facts_summary = "\n".join(f'- {fact}' for fact in key_facts)
         else:
             key_facts_summary = str(key_facts)
-        
+
         # Handle sources which could be a list, dict, or other format
         sources = research_data.get('sources', [])
         if isinstance(sources, dict):
@@ -173,7 +162,7 @@ Output your analysis in JSON format with:
             source_count = len(sources)
         else:
             source_count = 0
-        
+
         user_prompt = f"""Analyze the following research data and provide insights:
 
 Research Findings:
@@ -188,20 +177,18 @@ Provide comprehensive analysis with insights, patterns, and recommendations."""
 
         # Call LLM
         llm_response = self.call_llm(user_prompt, system_prompt)
-        
+
         # Parse actual LLM response
         parsed_response = self.parse_json_from_llm(llm_response)
-        
+
         if parsed_response and isinstance(parsed_response, dict):
-            # Use LLM-generated content
             key_findings = parsed_response.get("key_findings", [])
             insights = parsed_response.get("insights", [])
             patterns = parsed_response.get("patterns", [])
             recommendations = parsed_response.get("recommendations", [])
             gaps = parsed_response.get("gaps", [])
             synthesis = parsed_response.get("synthesis", "")
-            
-            # Validate that we got meaningful content
+
             if not key_findings or not insights:
                 self.stream_output("Warning: LLM response incomplete, using fallback structure")
                 key_findings = [
@@ -216,7 +203,6 @@ Provide comprehensive analysis with insights, patterns, and recommendations."""
                     }
                 ]
         else:
-            # Fallback if parsing fails
             self.stream_output("Warning: Failed to parse LLM response, using fallback structure")
             key_findings = [
                 "Critical finding 1 from synthesized data",
@@ -252,7 +238,7 @@ Provide comprehensive analysis with insights, patterns, and recommendations."""
             ]
             gaps = research_data.get("gaps", [])
             synthesis = "Comprehensive synthesis of all research findings, showing connections and implications."
-        
+
         analysis = {
             "key_findings": key_findings,
             "insights": insights,
@@ -262,5 +248,5 @@ Provide comprehensive analysis with insights, patterns, and recommendations."""
             "synthesis": synthesis,
             "llm_response": llm_response,
         }
-        
+
         return analysis

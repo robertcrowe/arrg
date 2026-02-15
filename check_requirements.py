@@ -25,7 +25,8 @@ def check_requirements():
     
     # 3. A2A Protocol
     try:
-        from arrg.protocol import A2AMessage, MessageType, SharedWorkspace
+        from arrg.a2a import Task, TaskState, Message, Artifact, AgentCard
+        from arrg.protocol import SharedWorkspace
         checks.append(("A2A Protocol implemented", True))
     except Exception as e:
         checks.append(("A2A Protocol implemented", False, str(e)))

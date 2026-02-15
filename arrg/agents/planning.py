@@ -1,14 +1,28 @@
-"""Planning Agent - Creates research plans and outlines."""
+"""Planning Agent - Creates research plans and outlines.
+
+Communicates via A2A Protocol v1.0 Tasks and Messages.
+"""
 
 from typing import Any, Dict
 from arrg.agents.base import BaseAgent
-from arrg.protocol import A2AMessage, MessageType
+from arrg.a2a import (
+    Task,
+    TaskState,
+    Message,
+    MessageRole,
+    TextPart,
+    DataPart,
+    Artifact,
+)
 
 
 class PlanningAgent(BaseAgent):
     """
     Planning Agent creates research plans and outlines.
     Decomposes the research topic into structured research questions and sections.
+
+    A2A Protocol: Receives a Task with topic in the user Message's DataPart,
+    produces an Artifact containing the research plan.
     """
 
     def get_capabilities(self) -> Dict[str, Any]:
@@ -26,86 +40,63 @@ class PlanningAgent(BaseAgent):
             "outputs": ["research_plan", "outline", "research_questions"],
         }
 
-    def process_message(self, message: A2AMessage) -> A2AMessage:
+    def process_task(self, task: Task, message: Message) -> Task:
         """
-        Process an incoming message and create a research plan.
-        
+        Process an A2A Task to create a research plan.
+
         Args:
-            message: Incoming A2A message
-            
+            task: A2A Task (in SUBMITTED state)
+            message: User Message containing topic and requirements
+
         Returns:
-            Response message with research plan
+            Updated Task with research plan Artifact (COMPLETED or FAILED)
         """
         self.receive_message(message)
-        
-        if message.message_type == MessageType.TASK_REQUEST:
-            try:
-                # Extract topic from payload
-                topic = message.payload.get("topic", "")
-                requirements = message.payload.get("requirements", {})
-                
-                self.stream_output(f"Creating research plan for topic: {topic}")
-                
-                # Generate research plan
-                plan = self._create_research_plan(topic, requirements)
-                
-                # Store plan in workspace
-                plan_key = f"research_plan_{message.message_id}"
-                self.workspace.store(plan_key, plan, persist=True)
-                
-                self.stream_output("Research plan created successfully")
-                
-                # Create response with reference to plan
-                response = self.create_task_complete_message(
-                    receiver=message.sender,
-                    result={
-                        "plan_reference": plan_key,
-                        "outline": plan["outline"],
-                        "research_questions": plan["research_questions"],
-                    },
-                    in_reply_to=message.message_id,
-                )
-                
-                self.send_message(response)
-                return response
-                
-            except Exception as e:
-                self.stream_output(f"Error creating research plan: {str(e)}")
-                error_msg = self.create_error_message(
-                    receiver=message.sender,
-                    error=str(e),
-                    in_reply_to=message.message_id,
-                )
-                self.send_message(error_msg)
-                return error_msg
-        
-        elif message.message_type == MessageType.CAPABILITY_QUERY:
-            response = A2AMessage(
-                message_type=MessageType.CAPABILITY_RESPONSE,
-                sender=self.agent_id,
-                receiver=message.sender,
-                payload=self.get_capabilities(),
-                in_reply_to=message.message_id,
+        task.update_state(TaskState.WORKING, message="Creating research plan")
+        task.add_to_history(message)
+
+        try:
+            # Extract topic from message DataPart
+            data = message.get_data() or {}
+            topic = data.get("topic", message.get_text())
+            requirements = data.get("requirements", {})
+
+            self.stream_output(f"Creating research plan for topic: {topic}")
+
+            # Generate research plan
+            plan = self._create_research_plan(topic, requirements)
+
+            # Store plan in workspace (for cross-agent reference)
+            plan_key = f"research_plan_{task.id}"
+            self.workspace.store(plan_key, plan, persist=True)
+
+            self.stream_output("Research plan created successfully")
+
+            # Complete the task with result
+            result = {
+                "plan_reference": plan_key,
+                "outline": plan["outline"],
+                "research_questions": plan["research_questions"],
+            }
+            return self.create_completed_task(
+                task, result_data=result,
+                result_text="Research plan created successfully",
             )
-            self.send_message(response)
-            return response
-        
-        return self.create_error_message(
-            receiver=message.sender,
-            error=f"Unsupported message type: {message.message_type}",
-            in_reply_to=message.message_id,
-        )
+
+        except Exception as e:
+            self.stream_output(f"Error creating research plan: {str(e)}")
+            return self.create_failed_task(task, error=str(e))
 
     def _create_research_plan(
         self, topic: str, requirements: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
         Create a structured research plan for the given topic.
-        
+
         Args:
             topic: Research topic
             requirements: Additional requirements
-            
+
         Returns:
             Research plan dictionary
         """
@@ -135,17 +126,17 @@ Provide a detailed research plan with research questions, outline, and methodolo
 
         # Call LLM
         llm_response = self.call_llm(user_prompt, system_prompt)
-        
+
         # Parse actual LLM response
         parsed_response = self.parse_json_from_llm(llm_response)
-        
+
         if parsed_response and isinstance(parsed_response, dict):
             # Use LLM-generated content
             research_questions = parsed_response.get("research_questions", [])
             outline = parsed_response.get("outline", {})
             key_areas = parsed_response.get("key_areas", [])
             methodology = parsed_response.get("methodology", [])
-            
+
             # Validate that we got meaningful content
             if not research_questions or not outline:
                 self.stream_output("Warning: LLM response incomplete, using fallback structure")
@@ -202,7 +193,7 @@ Provide a detailed research plan with research questions, outline, and methodolo
                 "Data analysis",
                 "Expert perspectives",
             ]
-        
+
         plan = {
             "topic": topic,
             "research_questions": research_questions,
@@ -211,5 +202,5 @@ Provide a detailed research plan with research questions, outline, and methodolo
             "methodology": methodology,
             "llm_response": llm_response,
         }
-        
+
         return plan

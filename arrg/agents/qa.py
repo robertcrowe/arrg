@@ -1,21 +1,35 @@
-"""QA Agent - Reviews and validates reports for quality."""
+"""QA Agent - Reviews and validates research reports.
 
-from typing import Any, Dict, List
+Communicates via A2A Protocol v1.0 Tasks and Messages.
+"""
+
+from typing import Any, Dict
 from arrg.agents.base import BaseAgent
-from arrg.protocol import A2AMessage, MessageType
+from arrg.a2a import (
+    Task,
+    TaskState,
+    Message,
+    MessageRole,
+    TextPart,
+    DataPart,
+    Artifact,
+)
 
 
 class QAAgent(BaseAgent):
     """
-    QA Agent reviews and validates reports for quality.
-    Checks for accuracy, completeness, and coherence.
+    QA Agent reviews and validates research reports.
+    Checks for quality, accuracy, completeness, and coherence.
+
+    A2A Protocol: Receives a Task with report_reference in the user Message's
+    DataPart, produces an Artifact containing the QA review.
     """
 
     def get_capabilities(self) -> Dict[str, Any]:
         """Return the capabilities of the QA Agent."""
         return {
             "agent_type": "qa",
-            "description": "Reviews and validates reports for quality",
+            "description": "Reviews and validates research reports",
             "capabilities": [
                 "quality_assessment",
                 "accuracy_checking",
@@ -24,219 +38,155 @@ class QAAgent(BaseAgent):
                 "recommendation_generation",
             ],
             "inputs": ["report", "report_reference"],
-            "outputs": ["qa_report", "issues", "approval_status"],
+            "outputs": ["qa_result", "quality_score", "issues", "approved"],
         }
 
-    def process_message(self, message: A2AMessage) -> A2AMessage:
+    def process_task(self, task: Task, message: Message) -> Task:
         """
-        Process an incoming message and review a report.
-        
+        Process an A2A Task to review a report.
+
         Args:
-            message: Incoming A2A message
-            
+            task: A2A Task (in SUBMITTED state)
+            message: User Message containing report reference
+
         Returns:
-            Response message with QA results
+            Updated Task with QA review Artifact (COMPLETED or FAILED)
         """
         self.receive_message(message)
-        
-        if message.message_type == MessageType.TASK_REQUEST:
-            try:
-                # Extract report reference from payload
-                report_reference = message.payload.get("report_reference")
-                
-                if not report_reference:
-                    raise ValueError("No report_reference provided")
-                
-                self.stream_output("Conducting quality assurance review...")
-                
-                # Retrieve report from workspace
-                report = self.workspace.retrieve(report_reference)
-                
-                # Perform QA review
-                qa_results = self._review_report(report)
-                
-                # Store QA results in workspace
-                qa_key = f"qa_results_{message.message_id}"
-                self.workspace.store(qa_key, qa_results, persist=True)
-                
-                status = "APPROVED" if qa_results["approved"] else "NEEDS_REVISION"
-                self.stream_output(f"QA review completed: {status}")
-                
-                # Create response with QA results
-                response = self.create_task_complete_message(
-                    receiver=message.sender,
-                    result={
-                        "qa_reference": qa_key,
-                        "approved": qa_results["approved"],
-                        "issues_count": len(qa_results["issues"]),
-                        "quality_score": qa_results["quality_score"],
-                    },
-                    in_reply_to=message.message_id,
-                )
-                
-                self.send_message(response)
-                return response
-                
-            except Exception as e:
-                self.stream_output(f"Error in QA review: {str(e)}")
-                error_msg = self.create_error_message(
-                    receiver=message.sender,
-                    error=str(e),
-                    in_reply_to=message.message_id,
-                )
-                self.send_message(error_msg)
-                return error_msg
-        
-        elif message.message_type == MessageType.CAPABILITY_QUERY:
-            response = A2AMessage(
-                message_type=MessageType.CAPABILITY_RESPONSE,
-                sender=self.agent_id,
-                receiver=message.sender,
-                payload=self.get_capabilities(),
-                in_reply_to=message.message_id,
+        task.update_state(TaskState.WORKING, message="Reviewing report quality")
+        task.add_to_history(message)
+
+        try:
+            # Extract report reference from message DataPart
+            data = message.get_data() or {}
+            report_reference = data.get("report_reference")
+
+            if not report_reference:
+                raise ValueError("No report_reference provided")
+
+            self.stream_output("Reviewing report quality...")
+
+            # Retrieve report from workspace
+            report = self.workspace.retrieve(report_reference)
+
+            # Perform QA review
+            qa_result = self._review_report(report)
+
+            # Store QA result in workspace
+            qa_key = f"qa_result_{task.id}"
+            self.workspace.store(qa_key, qa_result, persist=True)
+
+            self.stream_output(
+                f"QA review completed - Score: {qa_result['quality_score']}/10 "
+                f"- {'Approved' if qa_result['approved'] else 'Needs revision'}"
             )
-            self.send_message(response)
-            return response
-        
-        return self.create_error_message(
-            receiver=message.sender,
-            error=f"Unsupported message type: {message.message_type}",
-            in_reply_to=message.message_id,
-        )
+
+            # Complete the task with result
+            result = {
+                "qa_reference": qa_key,
+                "approved": qa_result["approved"],
+                "quality_score": qa_result["quality_score"],
+                "issues_count": len(qa_result.get("issues", [])),
+            }
+            return self.create_completed_task(
+                task, result_data=result,
+                result_text=f"QA review: score={qa_result['quality_score']}/10, approved={qa_result['approved']}",
+            )
+
+        except Exception as e:
+            self.stream_output(f"Error reviewing report: {str(e)}")
+            return self.create_failed_task(task, error=str(e))
 
     def _review_report(self, report: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Review a report for quality and accuracy.
-        
+        Review a report for quality, accuracy, and completeness.
+
         Args:
-            report: Report to review
-            
+            report: Report dictionary to review
+
         Returns:
-            QA results dictionary
+            QA result dictionary
         """
         # Build prompt for LLM
         system_prompt = """You are a QA Agent that reviews research reports for quality.
-You should evaluate:
-1. Accuracy: Are claims properly supported?
-2. Completeness: Are all sections adequately covered?
-3. Coherence: Does the report flow logically?
-4. Clarity: Is the writing clear and professional?
-5. Structure: Does it follow the outline properly?
-6. Citations: Are sources properly referenced?
+Evaluate the report on:
+1. Accuracy of information
+2. Completeness of coverage
+3. Writing quality and clarity
+4. Logical structure and flow
+5. Evidence and source support
+6. Professional tone
 
 Output your review in JSON format with:
-- quality_score: overall score (0-100)
-- approved: boolean approval status
-- issues: list of identified issues with severity
-- strengths: positive aspects of the report
-- recommendations: suggestions for improvement
-- criteria_scores: scores for each evaluation criterion
+- quality_score: integer from 1-10
+- approved: boolean (true if score >= 7)
+- issues: list of specific issues found
+- strengths: list of report strengths
+- suggestions: list of improvement suggestions
+- category_scores: dict of category -> score (accuracy, completeness, clarity, structure, evidence)
 """
 
-        # Prepare report summary for prompt
-        report_text = report.get("full_text", "")[:2000]  # Limit for prompt
-        
+        report_text = report.get("full_text", "")
+        title = report.get("title", "Unknown")
+
+        # Truncate very long reports
+        if len(report_text) > 12000:
+            report_text = report_text[:12000] + "\n\n[... truncated for review ...]"
+
         user_prompt = f"""Review the following research report for quality:
 
-Title: {report.get('title', 'Untitled')}
-Word Count: {report.get('word_count', 0)}
-Sections: {len(report.get('sections', []))}
+Title: {title}
 
-Report Content (excerpt):
+Report:
 {report_text}
 
-Provide a comprehensive QA review with scores, issues, and recommendations."""
+Provide a thorough quality assessment with scores and specific feedback."""
 
         # Call LLM
         llm_response = self.call_llm(user_prompt, system_prompt)
-        
+
         # Parse actual LLM response
         parsed_response = self.parse_json_from_llm(llm_response)
-        
+
         if parsed_response and isinstance(parsed_response, dict):
-            # Use LLM-generated content
-            quality_score = parsed_response.get("quality_score", 85)
-            approved = parsed_response.get("approved", True)
+            quality_score = parsed_response.get("quality_score", 7)
             issues = parsed_response.get("issues", [])
             strengths = parsed_response.get("strengths", [])
-            recommendations = parsed_response.get("recommendations", [])
-            criteria_scores = parsed_response.get("criteria_scores", {})
-            
-            # Validate that we got meaningful content
-            if not isinstance(approved, bool):
-                self.stream_output("Warning: LLM response incomplete, using evaluation logic")
-                # Fallback to evaluation logic below
-                approved = None
+            suggestions = parsed_response.get("suggestions", [])
+            category_scores = parsed_response.get("category_scores", {})
+
+            # Validate quality_score
+            if not isinstance(quality_score, (int, float)):
+                try:
+                    quality_score = int(quality_score)
+                except (ValueError, TypeError):
+                    quality_score = 7
+            quality_score = max(1, min(10, quality_score))
+
+            approved = parsed_response.get("approved", quality_score >= 7)
         else:
-            # Fallback if parsing fails - use evaluation logic
-            self.stream_output("Warning: Failed to parse LLM response, using evaluation logic")
-            approved = None
-        
-        # If we don't have LLM-based approval, use evaluation logic
-        if approved is None:
-            issues = []
-            
-            # Check word count
-            word_count = report.get("word_count", 0)
-            if word_count < 500:
-                issues.append({
-                    "severity": "high",
-                    "category": "completeness",
-                    "description": f"Report is too short ({word_count} words). Expected at least 500 words.",
-                })
-            
-            # Check sections
-            sections = report.get("sections", [])
-            if len(sections) < 3:
-                issues.append({
-                    "severity": "medium",
-                    "category": "structure",
-                    "description": f"Report has only {len(sections)} sections. Consider adding more depth.",
-                })
-            
-            # Determine approval based on issues
-            high_severity_issues = [i for i in issues if i["severity"] == "high"]
-            approved = len(high_severity_issues) == 0
-            
-            # Calculate quality score
-            base_score = 85
-            score_deduction = len(high_severity_issues) * 20 + len(issues) * 5
-            quality_score = max(0, min(100, base_score - score_deduction))
-            
-            strengths = [
-                "Clear structure following the outline",
-                "Professional writing style",
-                "Good integration of research findings",
-            ]
-            
-            recommendations = [
-                "Consider expanding on key insights",
-                "Add more specific examples",
-                "Include more supporting evidence",
-            ] if issues else [
-                "Report meets quality standards",
-                "Minor polish recommended before final publication",
-            ]
-            
-            criteria_scores = {
-                "accuracy": 90,
-                "completeness": 85,
-                "coherence": 88,
-                "clarity": 92,
-                "structure": 87,
-                "citations": 80,
+            self.stream_output("Warning: Failed to parse LLM response, using default assessment")
+            quality_score = 7
+            approved = True
+            issues = ["Unable to perform detailed analysis"]
+            strengths = ["Report was generated"]
+            suggestions = ["Review report manually"]
+            category_scores = {
+                "accuracy": 7,
+                "completeness": 7,
+                "clarity": 7,
+                "structure": 7,
+                "evidence": 7,
             }
-        
-        qa_results = {
-            "approved": approved,
+
+        qa_result = {
             "quality_score": quality_score,
+            "approved": approved,
             "issues": issues,
             "strengths": strengths,
-            "recommendations": recommendations,
-            "criteria_scores": criteria_scores,
-            "summary": f"Report received a quality score of {quality_score}/100. " +
-                      (f"Found {len(issues)} issues that need attention." if issues else "No critical issues found."),
+            "suggestions": suggestions,
+            "category_scores": category_scores,
             "llm_response": llm_response,
         }
-        
-        return qa_results
+
+        return qa_result

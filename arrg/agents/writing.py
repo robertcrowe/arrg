@@ -1,559 +1,315 @@
-"""Writing Agent - Transforms analysis into polished reports."""
+"""Writing Agent - Composes research reports from analysis.
+
+Communicates via A2A Protocol v1.0 Tasks and Messages.
+"""
 
 from typing import Any, Dict
 from arrg.agents.base import BaseAgent
-from arrg.protocol import A2AMessage, MessageType
+from arrg.a2a import (
+    Task,
+    TaskState,
+    Message,
+    MessageRole,
+    TextPart,
+    DataPart,
+    Artifact,
+)
 
 
 class WritingAgent(BaseAgent):
     """
-    Writing Agent transforms analysis into polished, well-structured reports.
-    Generates professional content following the research outline.
+    Writing Agent composes research reports from analysis.
+    Produces structured, well-written reports with proper sections.
+
+    A2A Protocol: Receives a Task with analysis/plan references in the user
+    Message's DataPart, produces an Artifact containing the report.
+    Also handles revision Tasks where the Task contains QA feedback.
     """
 
     def get_capabilities(self) -> Dict[str, Any]:
         """Return the capabilities of the Writing Agent."""
         return {
             "agent_type": "writing",
-            "description": "Transforms analysis into polished reports",
+            "description": "Composes research reports from analysis",
             "capabilities": [
-                "report_writing",
-                "content_structuring",
-                "professional_formatting",
-                "narrative_creation",
-                "section_composition",
+                "report_composition",
+                "section_writing",
+                "narrative_structuring",
+                "citation_integration",
+                "report_revision",
             ],
-            "inputs": ["analysis", "outline", "plan_reference", "analysis_reference"],
-            "outputs": ["report", "formatted_content"],
+            "inputs": ["analysis", "plan_reference", "qa_feedback"],
+            "outputs": ["report", "sections", "full_text"],
         }
 
-    def process_message(self, message: A2AMessage) -> A2AMessage:
+    def process_task(self, task: Task, message: Message) -> Task:
         """
-        Process an incoming message and write a report.
-        
+        Process an A2A Task to write or revise a report.
+
+        If the message data contains 'qa_feedback', this is a revision task.
+        Otherwise, it's an initial writing task.
+
         Args:
-            message: Incoming A2A message
-            
+            task: A2A Task (in SUBMITTED state)
+            message: User Message containing analysis references or QA feedback
+
         Returns:
-            Response message with report
+            Updated Task with report Artifact (COMPLETED or FAILED)
         """
         self.receive_message(message)
-        
-        if message.message_type == MessageType.TASK_REQUEST:
-            try:
-                # Extract references from payload
-                analysis_reference = message.payload.get("analysis_reference")
-                plan_reference = message.payload.get("plan_reference")
-                
-                if not analysis_reference or not plan_reference:
-                    raise ValueError("Missing analysis_reference or plan_reference")
-                
-                self.stream_output("Writing research report...")
-                
-                # Retrieve data from workspace
-                analysis = self.workspace.retrieve(analysis_reference)
-                plan = self.workspace.retrieve(plan_reference)
-                
-                # Write the report
-                report = self._write_report(analysis, plan)
-                
-                # Store report in workspace
-                report_key = f"report_{message.message_id}"
-                self.workspace.store(report_key, report, persist=True)
-                
-                self.stream_output("Report writing completed successfully")
-                
-                # Create response with reference to report
-                response = self.create_task_complete_message(
-                    receiver=message.sender,
-                    result={
-                        "report_reference": report_key,
-                        "word_count": report["word_count"],
-                        "section_count": len(report["sections"]),
-                    },
-                    in_reply_to=message.message_id,
-                )
-                
-                self.send_message(response)
-                return response
-                
-            except Exception as e:
-                self.stream_output(f"Error writing report: {str(e)}")
-                error_msg = self.create_error_message(
-                    receiver=message.sender,
-                    error=str(e),
-                    in_reply_to=message.message_id,
-                )
-                self.send_message(error_msg)
-                return error_msg
-        
-        elif message.message_type == MessageType.TASK_REJECTED:
-            try:
-                # Handle revision request from QA
-                analysis_reference = message.payload.get("analysis_reference")
-                plan_reference = message.payload.get("plan_reference")
-                qa_feedback = message.payload.get("qa_feedback", {})
-                
-                if not analysis_reference or not plan_reference:
-                    raise ValueError("Missing analysis_reference or plan_reference")
-                
-                self.stream_output("Revising report based on QA feedback...")
-                
-                # Retrieve data from workspace
-                analysis = self.workspace.retrieve(analysis_reference)
-                plan = self.workspace.retrieve(plan_reference)
-                
-                # Write revised report with QA feedback
-                report = self._revise_report(analysis, plan, qa_feedback)
-                
-                # Store revised report in workspace
-                report_key = f"report_revised_{message.message_id}"
-                self.workspace.store(report_key, report, persist=True)
-                
-                self.stream_output("Report revision completed successfully")
-                
-                # Create response with reference to revised report
-                response = self.create_task_complete_message(
-                    receiver=message.sender,
-                    result={
-                        "report_reference": report_key,
-                        "word_count": report["word_count"],
-                        "section_count": len(report["sections"]),
-                        "revised": True,
-                    },
-                    in_reply_to=message.message_id,
-                )
-                
-                self.send_message(response)
-                return response
-                
-            except Exception as e:
-                self.stream_output(f"Error revising report: {str(e)}")
-                error_msg = self.create_error_message(
-                    receiver=message.sender,
-                    error=str(e),
-                    in_reply_to=message.message_id,
-                )
-                self.send_message(error_msg)
-                return error_msg
-        
-        elif message.message_type == MessageType.CAPABILITY_QUERY:
-            response = A2AMessage(
-                message_type=MessageType.CAPABILITY_RESPONSE,
-                sender=self.agent_id,
-                receiver=message.sender,
-                payload=self.get_capabilities(),
-                in_reply_to=message.message_id,
-            )
-            self.send_message(response)
-            return response
-        
-        return self.create_error_message(
-            receiver=message.sender,
-            error=f"Unsupported message type: {message.message_type}",
-            in_reply_to=message.message_id,
-        )
+        task.add_to_history(message)
 
-    def _write_report(
-        self, analysis: Dict[str, Any], plan: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        try:
+            data = message.get_data() or {}
+
+            # Check if this is a revision task
+            if "qa_feedback" in data:
+                task.update_state(TaskState.WORKING, message="Revising report based on QA feedback")
+                self.stream_output("Revising report based on QA feedback...")
+                report = self._revise_report(data)
+            else:
+                task.update_state(TaskState.WORKING, message="Composing research report")
+                self.stream_output("Composing research report...")
+                report = self._write_report(data)
+
+            # Store report in workspace
+            report_key = f"report_{task.id}"
+            self.workspace.store(report_key, report, persist=True)
+
+            self.stream_output("Report completed successfully")
+
+            # Complete the task with result
+            result = {
+                "report_reference": report_key,
+                "word_count": len(report.get("full_text", "").split()),
+                "section_count": len(report.get("sections", {})),
+            }
+            return self.create_completed_task(
+                task, result_data=result,
+                result_text="Report completed successfully",
+            )
+
+        except Exception as e:
+            self.stream_output(f"Error writing report: {str(e)}")
+            return self.create_failed_task(task, error=str(e))
+
+    def _write_report(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Write a comprehensive research report.
-        
+        Write a research report from analysis data.
+
         Args:
-            analysis: Analysis data
-            plan: Research plan with outline
-            
+            data: Message data containing references to plan and analysis
+
         Returns:
-            Report dictionary
+            Report dictionary with sections and full_text
         """
+        plan_reference = data.get("plan_reference")
+        analysis_reference = data.get("analysis_reference")
+
+        # Retrieve plan and analysis from workspace
+        plan = self.workspace.retrieve(plan_reference) if plan_reference else {}
+        analysis = self.workspace.retrieve(analysis_reference) if analysis_reference else {}
+
         # Build prompt for LLM
-        system_prompt = """You are a Writing Agent that creates professional research reports.
-You should:
-1. Follow the provided outline structure
-2. Write clear, well-organized content
-3. Integrate insights and findings naturally
-4. Use professional academic/business writing style
-5. Include proper transitions between sections
-6. Cite key findings appropriately
+        system_prompt = """You are a Writing Agent that composes comprehensive research reports.
+You must write a well-structured report with:
+1. Clear introduction with context and objectives
+2. Well-organized sections following the outline
+3. Integration of research findings and analysis insights
+4. Proper conclusions and recommendations
+5. Professional writing style
 
 Output your report in JSON format with:
 - title: report title
-- sections: list of sections with titles and content
-- executive_summary: brief overview
-- conclusion: final synthesis
-- full_text: complete report in markdown format
+- sections: ordered dict of section_name -> section_content (full markdown text)
+- full_text: the complete report as a single markdown document
+- executive_summary: brief summary of findings
 """
 
-        # Prepare outline and insights
-        outline_text = "\n".join(
-            f"{key}: {value}" for key, value in plan.get("outline", {}).items()
-        )
-        
-        # Handle different insight structures
-        insights = analysis.get("insights", [])
-        insights_list = []
-        for insight in insights:
-            if isinstance(insight, dict):
-                # Try different key combinations
-                title = insight.get("title") or insight.get("insight") or insight.get("name", "Insight")
-                description = insight.get("description") or insight.get("analysis") or insight.get("content", "")
-                insights_list.append(f"- {title}: {description}")
-            elif isinstance(insight, str):
-                insights_list.append(f"- {insight}")
-        insights_text = "\n".join(insights_list)
-        
-        user_prompt = f"""Write a comprehensive research report on: {plan.get('topic', 'the given topic')}
+        # Prepare context
+        outline = plan.get("outline", {}) if plan else {}
+        key_findings = analysis.get("key_findings", []) if analysis else []
+        insights = analysis.get("insights", []) if analysis else []
+        recommendations = analysis.get("recommendations", []) if analysis else []
 
-Outline to follow:
+        # Format outline
+        if isinstance(outline, dict):
+            outline_text = "\n".join(
+                f"- {k}: {v}" if not isinstance(v, dict)
+                else f"- {k}:\n" + "\n".join(f"  - {sk}: {sv}" for sk, sv in v.items())
+                for k, v in outline.items()
+            )
+        elif isinstance(outline, list):
+            outline_text = "\n".join(f"- {item}" for item in outline)
+        else:
+            outline_text = str(outline)
+
+        # Format insights
+        insights_text = ""
+        if isinstance(insights, list):
+            for i, insight in enumerate(insights):
+                if isinstance(insight, dict):
+                    insights_text += f"- {insight.get('title', f'Insight {i+1}')}: {insight.get('description', '')}\n"
+                else:
+                    insights_text += f"- {insight}\n"
+        elif isinstance(insights, dict):
+            for k, v in insights.items():
+                insights_text += f"- {k}: {v}\n"
+
+        user_prompt = f"""Write a comprehensive research report based on the following:
+
+Topic: {plan.get('topic', 'Research Topic') if plan else 'Research Topic'}
+
+Outline:
 {outline_text}
 
-Key Insights to incorporate:
-{insights_text}
-
 Key Findings:
-{chr(10).join(f'- {finding}' for finding in analysis.get('key_findings', []))}
+{chr(10).join(f'- {f}' for f in key_findings) if key_findings else '- No specific findings provided'}
 
-Create a well-structured, professional report with all sections."""
+Insights:
+{insights_text or '- No specific insights provided'}
 
-        # Call LLM with appropriate token limit for comprehensive reports
-        # Claude models typically support 8192 max_tokens for output
-        llm_response = self.call_llm(user_prompt, system_prompt, max_tokens=8192)
-        
+Recommendations:
+{chr(10).join(f'- {r}' for r in recommendations) if recommendations else '- No specific recommendations provided'}
+
+Write a professional, well-structured report following the outline."""
+
+        # Call LLM with higher token limit for report generation
+        llm_response = self.call_llm(user_prompt, system_prompt, max_tokens=16384)
+
         # Parse actual LLM response
         parsed_response = self.parse_json_from_llm(llm_response)
-        
+
         if parsed_response and isinstance(parsed_response, dict):
-            # Use LLM-generated content
-            title = parsed_response.get("title", f"Research Report: {plan.get('topic', 'Research Topic')}")
-            sections = parsed_response.get("sections", [])
-            executive_summary = parsed_response.get("executive_summary", "")
-            conclusion = parsed_response.get("conclusion", "")
+            title = parsed_response.get("title", "Research Report")
+            sections = parsed_response.get("sections", {})
             full_text = parsed_response.get("full_text", "")
-            
-            # Validate that we got meaningful content
-            if not sections or not full_text:
-                self.stream_output("Warning: LLM response incomplete, generating fallback content")
-                sections = []
-                word_count = 0
-                
-                for section_key, section_value in plan.get("outline", {}).items():
-                    # Extract title from nested structure if present
-                    if isinstance(section_value, dict) and 'title' in section_value:
-                        section_title = section_value.get('title', section_key)
-                        subsections = section_value.get('subsections', {})
-                    else:
-                        section_title = section_key
-                        subsections = section_value if isinstance(section_value, dict) else {}
-                    
-                    section_content = f"This section covers {section_title}. "
-                    section_content += f"Based on our research and analysis, we found that... "
-                    section_content += f"The key insights related to this area include... "
-                    
-                    sections.append({
-                        "title": section_title,
-                        "content": section_content,
-                        "subsections": subsections,
-                    })
-                    word_count += len(section_content.split())
-                
-                # Build full markdown text for incomplete response
-                markdown_sections = []
-                for section in sections:
-                    markdown_sections.append(f"## {section.get('title', 'Untitled Section')}\n\n{section.get('content', '')}\n")
-                    if section.get('subsections') and isinstance(section.get('subsections'), dict):
-                        for sub_key, sub_val in section.get('subsections', {}).items():
-                            markdown_sections.append(f"### {sub_key}\n\n{sub_val}\n")
-                
-                full_text = f"""# {title}
+            executive_summary = parsed_response.get("executive_summary", "")
 
-## Executive Summary
+            if not full_text and sections:
+                full_text = f"# {title}\n\n"
+                if executive_summary:
+                    full_text += f"## Executive Summary\n\n{executive_summary}\n\n"
+                for section_name, section_content in sections.items():
+                    full_text += f"## {section_name}\n\n{section_content}\n\n"
 
-This comprehensive research report examines {plan.get('topic', 'the topic')}. Through systematic research and analysis, we have identified key insights and trends that inform our understanding of this area.
-
-{''.join(markdown_sections)}
-
-## Conclusion
-
-This report has provided a comprehensive analysis of {plan.get('topic', 'the topic')}. The key findings demonstrate significant insights that can inform future work in this area.
-"""
-                executive_summary = f"This comprehensive research report examines {plan.get('topic', 'the topic')}. Through systematic research and analysis, we have identified key insights and trends that inform our understanding of this area."
-                conclusion = f"This report has provided a comprehensive analysis of {plan.get('topic', 'the topic')}. The key findings demonstrate significant insights that can inform future work in this area."
+            if not full_text:
+                self.stream_output("Warning: LLM response incomplete, using raw response as report")
+                full_text = llm_response
+                title = "Research Report"
+                sections = {"Full Report": llm_response}
         else:
-            # Fallback if parsing fails
-            self.stream_output("Warning: Failed to parse LLM response, using fallback structure")
-            sections = []
-            word_count = 0
-            
-            for section_key, section_value in plan.get("outline", {}).items():
-                # Extract title from nested structure if present
-                if isinstance(section_value, dict) and 'title' in section_value:
-                    section_title = section_value.get('title', section_key)
-                    subsections = section_value.get('subsections', {})
-                else:
-                    section_title = section_key
-                    subsections = section_value if isinstance(section_value, dict) else {}
-                
-                section_content = f"This section covers {section_title}. "
-                section_content += f"Based on our research and analysis, we found that... "
-                section_content += f"The key insights related to this area include... "
-                section_content += f"Furthermore, the evidence suggests... "
-                section_content += f"In conclusion for this section, we observe that..."
-                
-                sections.append({
-                    "title": section_title,
-                    "content": section_content,
-                    "subsections": subsections,
-                })
-                word_count += len(section_content.split())
-            
-            # Build full markdown text
-            markdown_sections = []
-            for section in sections:
-                markdown_sections.append(f"## {section.get('title', 'Untitled Section')}\n\n{section.get('content', '')}\n")
-                if section.get('subsections') and isinstance(section.get('subsections'), dict):
-                    for sub_key, sub_val in section.get('subsections', {}).items():
-                        markdown_sections.append(f"### {sub_key}\n\n{sub_val}\n")
-            
-            full_text = f"""# Research Report: {plan.get('topic', 'Research Topic')}
+            self.stream_output("Warning: Failed to parse LLM response, using raw response as report")
+            title = "Research Report"
+            full_text = llm_response
+            sections = {"Full Report": llm_response}
+            executive_summary = ""
 
-## Executive Summary
-
-This comprehensive research report examines {plan.get('topic', 'the topic')}. Through systematic research and analysis, we have identified key insights and trends that inform our understanding of this area.
-
-{''.join(markdown_sections)}
-
-## Conclusion
-
-This report has provided a comprehensive analysis of {plan.get('topic', 'the topic')}. The key findings demonstrate significant insights that can inform future work in this area.
-"""
-            title = f"Research Report: {plan.get('topic', 'Research Topic')}"
-            executive_summary = f"This comprehensive research report examines {plan.get('topic', 'the topic')}. Through systematic research and analysis, we have identified key insights and trends that inform our understanding of this area."
-            conclusion = f"This report has provided a comprehensive analysis of {plan.get('topic', 'the topic')}. The key findings demonstrate significant insights that can inform future work in this area."
-            word_count = word_count + 100  # Approximate with summary/conclusion
-        
         report = {
             "title": title,
-            "topic": plan.get("topic"),
             "sections": sections,
-            "executive_summary": executive_summary,
-            "conclusion": conclusion,
             "full_text": full_text,
-            "word_count": len(full_text.split()) if full_text else word_count,
+            "executive_summary": executive_summary,
             "llm_response": llm_response,
         }
-        
+
         return report
 
-    def _revise_report(
-        self, analysis: Dict[str, Any], plan: Dict[str, Any], qa_feedback: Dict[str, Any]
-    ) -> Dict[str, Any]:
+    def _revise_report(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Revise a report based on QA feedback.
-        
+
         Args:
-            analysis: Analysis data
-            plan: Research plan with outline
-            qa_feedback: QA feedback with issues and recommendations
-            
+            data: Message data containing report reference and QA feedback
+
         Returns:
             Revised report dictionary
         """
-        # Build prompt for LLM with QA feedback
-        system_prompt = """You are a Writing Agent revising a research report based on QA feedback.
-You should:
-1. Address all issues identified in the QA review
-2. Follow the recommendations provided
-3. Improve areas flagged for enhancement
-4. Maintain the overall structure and quality
-5. Ensure all sections meet quality standards
+        report_reference = data.get("report_reference")
+        qa_feedback = data.get("qa_feedback", {})
 
-Output your revised report in JSON format with:
+        # Retrieve original report from workspace
+        original_report = self.workspace.retrieve(report_reference) if report_reference else {}
+
+        # Build revision prompt
+        system_prompt = """You are a Writing Agent revising a research report based on QA feedback.
+Address all issues raised by the QA Agent while maintaining the report's strengths.
+
+Output the revised report in JSON format with:
 - title: report title
-- sections: list of sections with titles and content
-- executive_summary: brief overview
-- conclusion: final synthesis
-- full_text: complete report in markdown format
+- sections: ordered dict of section_name -> section_content
+- full_text: the complete revised report as markdown
+- executive_summary: brief summary
+- revision_notes: what was changed
 """
 
-        # Extract QA issues and recommendations
-        issues_text = "\n".join(
-            f"- [{issue['severity'].upper()}] {issue['category']}: {issue['description']}"
-            for issue in qa_feedback.get("issues", [])
-        )
-        
-        recommendations_text = "\n".join(
-            f"- {rec}" for rec in qa_feedback.get("recommendations", [])
-        )
-        
-        # Prepare outline and insights
-        outline_text = "\n".join(
-            f"{key}: {value}" for key, value in plan.get("outline", {}).items()
-        )
-        
-        # Handle different insight structures
-        insights = analysis.get("insights", [])
-        insights_list = []
-        for insight in insights:
-            if isinstance(insight, dict):
-                # Try different key combinations
-                title = insight.get("title") or insight.get("insight") or insight.get("name", "Insight")
-                description = insight.get("description") or insight.get("analysis") or insight.get("content", "")
-                insights_list.append(f"- {title}: {description}")
-            elif isinstance(insight, str):
-                insights_list.append(f"- {insight}")
-        insights_text = "\n".join(insights_list)
-        
-        user_prompt = f"""Revise the research report on: {plan.get('topic', 'the given topic')}
+        # Format QA issues
+        issues = qa_feedback.get("issues", [])
+        if isinstance(issues, list):
+            issues_text = "\n".join(f"- {issue}" for issue in issues)
+        elif isinstance(issues, dict):
+            issues_text = "\n".join(f"- {k}: {v}" for k, v in issues.items())
+        else:
+            issues_text = str(issues)
 
-QA FEEDBACK - Issues to Address:
-{issues_text if issues_text else "No critical issues"}
+        suggestions = qa_feedback.get("suggestions", [])
+        if isinstance(suggestions, list):
+            suggestions_text = "\n".join(f"- {s}" for s in suggestions)
+        elif isinstance(suggestions, dict):
+            suggestions_text = "\n".join(f"- {k}: {v}" for k, v in suggestions.items())
+        else:
+            suggestions_text = str(suggestions)
 
-QA FEEDBACK - Recommendations:
-{recommendations_text}
+        user_prompt = f"""Revise the following report based on QA feedback:
 
-Quality Score: {qa_feedback.get('quality_score', 0)}/100
+Original Report:
+{original_report.get('full_text', 'No report available')[:8000]}
 
-Outline to follow:
-{outline_text}
+QA Score: {qa_feedback.get('quality_score', 'N/A')}
 
-Key Insights to incorporate:
-{insights_text}
+Issues Found:
+{issues_text}
 
-Key Findings:
-{chr(10).join(f'- {finding}' for finding in analysis.get('key_findings', []))}
+Suggestions:
+{suggestions_text}
 
-Create an improved, well-structured report that addresses all QA feedback."""
+Please address all issues and improve the report quality."""
 
-        # Call LLM with appropriate token limit for comprehensive revised reports
-        # Claude models typically support 8192 max_tokens for output
-        llm_response = self.call_llm(user_prompt, system_prompt, max_tokens=8192)
-        
+        # Call LLM
+        llm_response = self.call_llm(user_prompt, system_prompt, max_tokens=16384)
+
         # Parse actual LLM response
         parsed_response = self.parse_json_from_llm(llm_response)
-        
+
         if parsed_response and isinstance(parsed_response, dict):
-            # Use LLM-generated content
-            title = parsed_response.get("title", f"Research Report: {plan.get('topic', 'Research Topic')} (Revised)")
-            sections = parsed_response.get("sections", [])
-            executive_summary = parsed_response.get("executive_summary", "")
-            conclusion = parsed_response.get("conclusion", "")
+            title = parsed_response.get("title", original_report.get("title", "Research Report"))
+            sections = parsed_response.get("sections", {})
             full_text = parsed_response.get("full_text", "")
-            
-            # Validate that we got meaningful content
-            if not sections or not full_text:
-                self.stream_output("Warning: LLM response incomplete, generating enhanced fallback content")
-                sections = []
-                word_count = 0
-                
-                for section_key, section_value in plan.get("outline", {}).items():
-                    # Extract title from nested structure if present
-                    if isinstance(section_value, dict) and 'title' in section_value:
-                        section_title = section_value.get('title', section_key)
-                        subsections = section_value.get('subsections', {})
-                    else:
-                        section_title = section_key
-                        subsections = section_value if isinstance(section_value, dict) else {}
-                    
-                    section_content = f"This section provides a comprehensive examination of {section_title}. "
-                    section_content += f"Based on extensive research and thorough analysis, our findings indicate... "
-                    section_content += f"The key insights and patterns that emerged include... "
-                    
-                    sections.append({
-                        "title": section_title,
-                        "content": section_content,
-                        "subsections": subsections,
-                    })
-                    word_count += len(section_content.split())
-                
-                # Build full markdown text for incomplete revised response
-                markdown_sections = []
-                for section in sections:
-                    markdown_sections.append(f"## {section.get('title', 'Untitled Section')}\n\n{section.get('content', '')}\n")
-                    if section.get('subsections') and isinstance(section.get('subsections'), dict):
-                        for sub_key, sub_val in section.get('subsections', {}).items():
-                            markdown_sections.append(f"### {sub_key}\n\n{sub_val}\n")
-                
-                full_text = f"""# {title}
+            executive_summary = parsed_response.get("executive_summary", "")
 
-## Executive Summary
+            if not full_text and sections:
+                full_text = f"# {title}\n\n"
+                if executive_summary:
+                    full_text += f"## Executive Summary\n\n{executive_summary}\n\n"
+                for section_name, section_content in sections.items():
+                    full_text += f"## {section_name}\n\n{section_content}\n\n"
 
-This comprehensive and thoroughly revised research report examines {plan.get('topic', 'the topic')}. Through systematic research, rigorous analysis, and careful revision based on quality assurance feedback, we have identified and expanded upon key insights and trends that inform our understanding of this area. This report addresses all quality concerns and provides enhanced depth and clarity.
-
-{''.join(markdown_sections)}
-
-## Conclusion
-
-This revised report has provided a comprehensive and enhanced analysis of {plan.get('topic', 'the topic')}. The key findings, now presented with greater detail and support, demonstrate significant insights that can inform future work in this area. All quality assurance feedback has been incorporated to ensure the highest standards.
-"""
-                executive_summary = f"This comprehensive and thoroughly revised research report examines {plan.get('topic', 'the topic')}. Through systematic research, rigorous analysis, and careful revision based on quality assurance feedback, we have identified and expanded upon key insights and trends that inform our understanding of this area."
-                conclusion = f"This revised report has provided a comprehensive and enhanced analysis of {plan.get('topic', 'the topic')}. The key findings, now presented with greater detail and support, demonstrate significant insights that can inform future work in this area."
+            if not full_text:
+                full_text = llm_response
+                sections = {"Full Report": llm_response}
         else:
-            # Fallback if parsing fails
-            self.stream_output("Warning: Failed to parse LLM response, using enhanced fallback structure")
-            sections = []
-            word_count = 0
-            
-            for section_key, section_value in plan.get("outline", {}).items():
-                # Extract title from nested structure if present
-                if isinstance(section_value, dict) and 'title' in section_value:
-                    section_title = section_value.get('title', section_key)
-                    subsections = section_value.get('subsections', {})
-                else:
-                    section_title = section_key
-                    subsections = section_value if isinstance(section_value, dict) else {}
-                
-                # Generate more substantial content for revision
-                section_content = f"This section provides a comprehensive examination of {section_title}. "
-                section_content += f"Based on extensive research and thorough analysis, our findings indicate... "
-                section_content += f"The key insights and patterns that emerged from this investigation include... "
-                section_content += f"Furthermore, the evidence strongly suggests multiple important implications... "
-                section_content += f"Detailed examination reveals additional nuanced factors... "
-                section_content += f"In conclusion for this section, we observe significant correlations and trends that..."
-                
-                sections.append({
-                    "title": section_title,
-                    "content": section_content,
-                    "subsections": subsections,
-                })
-                word_count += len(section_content.split())
-            
-            # Build full markdown text
-            markdown_sections = []
-            for section in sections:
-                markdown_sections.append(f"## {section.get('title', 'Untitled Section')}\n\n{section.get('content', '')}\n")
-                if section.get('subsections') and isinstance(section.get('subsections'), dict):
-                    for sub_key, sub_val in section.get('subsections', {}).items():
-                        markdown_sections.append(f"### {sub_key}\n\n{sub_val}\n")
-            
-            full_text = f"""# Research Report: {plan.get('topic', 'Research Topic')}
+            title = original_report.get("title", "Research Report")
+            full_text = llm_response
+            sections = {"Full Report": llm_response}
+            executive_summary = ""
 
-## Executive Summary
-
-This comprehensive and thoroughly revised research report examines {plan.get('topic', 'the topic')}. Through systematic research, rigorous analysis, and careful revision based on quality assurance feedback, we have identified and expanded upon key insights and trends that inform our understanding of this area. This report addresses all quality concerns and provides enhanced depth and clarity.
-
-{''.join(markdown_sections)}
-
-## Conclusion
-
-This revised report has provided a comprehensive and enhanced analysis of {plan.get('topic', 'the topic')}. The key findings, now presented with greater detail and support, demonstrate significant insights that can inform future work in this area. All quality assurance feedback has been incorporated to ensure the highest standards.
-"""
-            title = f"Research Report: {plan.get('topic', 'Research Topic')} (Revised)"
-            executive_summary = f"This comprehensive and thoroughly revised research report examines {plan.get('topic', 'the topic')}. Through systematic research, rigorous analysis, and careful revision based on quality assurance feedback, we have identified and expanded upon key insights and trends that inform our understanding of this area."
-            conclusion = f"This revised report has provided a comprehensive and enhanced analysis of {plan.get('topic', 'the topic')}. The key findings, now presented with greater detail and support, demonstrate significant insights that can inform future work in this area."
-            word_count = word_count + 150  # More content in revision
-        
         report = {
             "title": title,
-            "topic": plan.get("topic"),
             "sections": sections,
-            "executive_summary": executive_summary,
-            "conclusion": conclusion,
             "full_text": full_text,
-            "word_count": len(full_text.split()) if full_text else word_count,
+            "executive_summary": executive_summary,
+            "revision_notes": parsed_response.get("revision_notes", "Revised based on QA feedback") if parsed_response else "Revised based on QA feedback",
             "llm_response": llm_response,
-            "revised": True,
-            "qa_feedback_addressed": qa_feedback,
         }
-        
+
         return report

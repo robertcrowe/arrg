@@ -1,8 +1,13 @@
 """
 Base agent classes and interfaces.
 
-Supports A2A messaging with MCP (Model Context Protocol) 2025-11-25 tool integration.
-All tool-calling flows through the MCP protocol using tools/list and tools/call.
+All agent-to-agent communication uses the A2A Protocol v1.0:
+- Tasks with state machine (submitted → working → completed/failed)
+- Messages with typed Parts (TextPart, DataPart, FilePart)
+- Artifacts for deliverable outputs
+- AgentCards for capability advertisement
+
+Tool-calling uses MCP (Model Context Protocol) 2025-11-25 - complementary to A2A.
 """
 
 from abc import ABC, abstractmethod
@@ -11,14 +16,35 @@ import logging
 import json
 import re
 
-from arrg.protocol import A2AMessage, MessageType, SharedWorkspace
-from arrg.a2a import AgentCard, AgentCapability
+from arrg.a2a import (
+    AgentCard,
+    AgentSkill,
+    AgentProvider,
+    AgentCapabilities,
+    Task,
+    TaskState,
+    TaskStatus,
+    Message,
+    MessageRole,
+    TextPart,
+    DataPart,
+    Artifact,
+)
+from arrg.protocol import SharedWorkspace
 from arrg.mcp import MCPToolRegistry, MCPToolCall, MCPToolResult, TextContent, get_tool_registry
 
 
 class BaseAgent(ABC):
     """
     Abstract base class for all agents in the ARRG system.
+
+    Communication follows the A2A Protocol v1.0:
+    - Agents advertise capabilities via AgentCards
+    - Work is exchanged as Tasks with lifecycle state management
+    - Messages carry typed Parts (text, data, file)
+    - Outputs are represented as Artifacts
+
+    Tool-calling follows MCP 2025-11-25 (complementary to A2A).
     """
 
     def __init__(
@@ -32,11 +58,11 @@ class BaseAgent(ABC):
     ):
         """
         Initialize the base agent.
-        
+
         Args:
             agent_id: Unique identifier for this agent
-            model: Model string (e.g., 'gpt-4o', 'claude-3-5-sonnet')
-            workspace: Shared workspace for storing artifacts
+            model: Model string (e.g., 'claude-haiku-4-5', 'gpt-4o')
+            workspace: Shared workspace for artifact storage
             api_key: API key for the model provider
             provider_endpoint: API provider endpoint
             stream_callback: Optional callback for streaming output
@@ -48,90 +74,96 @@ class BaseAgent(ABC):
         self.provider_endpoint = provider_endpoint
         self.stream_callback = stream_callback
         self.logger = logging.getLogger(f"arrg.agent.{agent_id}")
-        
-        # Message history for this agent
-        self.message_history: list[A2AMessage] = []
-        
-        # Initialize MCP tool registry
+
+        # A2A message history for this agent
+        self.message_history: list[Message] = []
+
+        # Initialize MCP tool registry (MCP is complementary to A2A for tool-calling)
         self.tool_registry = get_tool_registry()
-        
-        # Create AgentCard for A2A protocol
+
+        # Create A2A AgentCard for capability advertisement
         capabilities = self.get_capabilities()
-        
-        # Map agent type to AgentCapability enum
-        agent_type_map = {
-            "planning": AgentCapability.PLANNING,
-            "research": AgentCapability.RESEARCH,
-            "analysis": AgentCapability.ANALYSIS,
-            "writing": AgentCapability.WRITING,
-            "qa": AgentCapability.QA,
-        }
-        
-        # Get the primary capability based on agent_type
         agent_type = capabilities.get("agent_type", agent_id)
-        primary_capability = agent_type_map.get(agent_type, AgentCapability.DATA_PROCESSING)
-        
+
         self.agent_card = AgentCard(
-            agent_id=agent_id,
-            name=agent_id.title() + " Agent",
+            name=f"{agent_id.title()} Agent",
             description=capabilities.get("description", f"Agent for {agent_id}"),
-            capabilities=[primary_capability],
-            supported_message_types=["task", "query", "response"],
+            url=f"local://{agent_id}",  # In-process agents use local:// scheme
+            version="1.0.0",
+            provider=AgentProvider(organization="ARRG"),
+            capabilities=AgentCapabilities(
+                streaming=stream_callback is not None,
+                push_notifications=False,
+                state_transition_history=True,
+            ),
+            skills=[
+                AgentSkill(
+                    id=f"{agent_type}_{cap}",
+                    name=cap.replace("_", " ").title(),
+                    description=f"{agent_type} agent capability: {cap}",
+                    tags=[agent_type, cap],
+                )
+                for cap in capabilities.get("capabilities", [])
+            ],
             metadata=capabilities,
-            version="1.0.0"
         )
 
     @abstractmethod
     def get_capabilities(self) -> Dict[str, Any]:
         """
         Return the capabilities of this agent.
-        
+
         Returns:
             Dictionary describing agent capabilities
         """
         pass
 
     @abstractmethod
-    def process_message(self, message: A2AMessage) -> A2AMessage:
+    def process_task(self, task: Task, message: Message) -> Task:
         """
-        Process an incoming A2A message and return a response.
-        
+        Process an A2A Task with its initial message and return the updated Task.
+
+        Per A2A Protocol: The agent receives a Task (in SUBMITTED state) with
+        a user Message, processes it, updates the Task state to WORKING then
+        COMPLETED/FAILED, and adds response Messages and Artifacts.
+
         Args:
-            message: Incoming A2A message
-            
+            task: A2A Task to process
+            message: The user Message triggering this task
+
         Returns:
-            Response message
+            Updated Task with new state, messages, and artifacts
         """
         pass
 
-    def send_message(self, message: A2AMessage):
+    def send_message(self, message: Message):
         """
-        Log an outgoing message.
-        
+        Log an outgoing A2A message.
+
         Args:
             message: Message being sent
         """
         self.message_history.append(message)
         self.logger.info(
-            f"Sent {message.message_type.value} from {message.sender} to {message.receiver}"
+            f"Sent {message.role.value} message from {message.sender}"
         )
 
-    def receive_message(self, message: A2AMessage):
+    def receive_message(self, message: Message):
         """
-        Log an incoming message.
-        
+        Log an incoming A2A message.
+
         Args:
             message: Message being received
         """
         self.message_history.append(message)
         self.logger.info(
-            f"Received {message.message_type.value} from {message.sender}"
+            f"Received {message.role.value} message from {message.sender}"
         )
 
     def stream_output(self, text: str):
         """
         Stream output to the dashboard console.
-        
+
         Args:
             text: Text to stream
         """
@@ -140,73 +172,73 @@ class BaseAgent(ABC):
         self.logger.debug(text)
 
     def call_llm(
-        self, 
-        prompt: str, 
-        system_prompt: Optional[str] = None, 
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
         max_tokens: int = 8192,
         use_tools: bool = False,
         max_tool_rounds: int = 5,
     ) -> str:
         """
         Call the LLM with the given prompt, optionally with MCP tools.
-        
+
         When use_tools=True, this implements an agentic tool-call execution loop:
         1. Send prompt + MCP tool schemas (via tools/list) to the LLM
         2. If LLM responds with tool_calls, execute each via MCP tools/call
         3. Feed MCP tool results back to the LLM as tool messages
         4. Repeat until LLM responds with text content (no more tool_calls)
-        
+
         All tool definitions come from MCPToolRegistry.get_tools_for_llm()
         (MCP tools/list → OpenAI format bridge).  All tool execution goes
         through MCPToolRegistry.call_tool() (MCP tools/call).
-        
+
         Args:
             prompt: User prompt
             system_prompt: Optional system prompt
             max_tokens: Maximum tokens to generate (default: 8192)
             use_tools: Whether to include MCP tools in the call
             max_tool_rounds: Maximum rounds of tool-call → result loops (default: 5)
-            
+
         Returns:
             LLM response text (final text after all tool calls are resolved)
         """
         from arrg.utils.llm_client import LLMClient
-        
+
         tools_info = " with MCP tools" if use_tools else ""
         self.stream_output(f"Calling LLM ({self.model}){tools_info} max_tokens={max_tokens}...")
         self.logger.info(f"LLM Call with max_tokens={max_tokens}{tools_info}: {prompt[:100]}...")
-        
+
         try:
             client = LLMClient(
                 provider=self.provider_endpoint,
                 api_key=self.api_key,
                 model=self.model,
             )
-            
+
             # Get MCP tool schemas for LLM (MCP tools/list → OpenAI format)
             tools = None
             if use_tools:
                 tools = self.tool_registry.get_tools_for_llm()
                 tool_names = [t['function']['name'] for t in tools]
                 self.logger.info(f"MCP tools/list returned {len(tools)} tools: {tool_names}")
-            
+
             if not use_tools:
                 # Simple call without tools
                 response = client.call(
-                    prompt, 
-                    system_prompt, 
+                    prompt,
+                    system_prompt,
                     max_tokens=max_tokens,
                     tools=None,
                 )
                 return response
-            
+
             # --- Agentic tool-call execution loop ---
             # Build conversation messages for multi-turn tool use
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
             messages.append({"role": "user", "content": prompt})
-            
+
             for round_num in range(max_tool_rounds):
                 # Call LLM with tools and full message history
                 response = client.call_with_messages(
@@ -214,31 +246,31 @@ class BaseAgent(ABC):
                     max_tokens=max_tokens,
                     tools=tools,
                 )
-                
+
                 # Check if LLM returned tool calls
                 if not response.get("tool_calls"):
                     # No tool calls — LLM is done, return text content
                     text = response.get("content", "")
                     self.logger.info(f"LLM finished after {round_num} tool-call round(s)")
                     return text
-                
+
                 # LLM wants to call tools — execute each via MCP tools/call
                 tool_calls = response["tool_calls"]
                 assistant_content = response.get("content", None)
-                
+
                 # Add the assistant's message (with tool_calls) to history
                 assistant_msg: Dict[str, Any] = {"role": "assistant", "tool_calls": tool_calls}
                 if assistant_content:
                     assistant_msg["content"] = assistant_content
                 messages.append(assistant_msg)
-                
+
                 self.stream_output(f"LLM requested {len(tool_calls)} MCP tool call(s) (round {round_num + 1})")
-                
+
                 for tc in tool_calls:
                     tc_id = tc.get("id", f"call_{round_num}")
                     func = tc.get("function", {})
                     tool_name = func.get("name", "unknown")
-                    
+
                     # Parse arguments (LLM may return as JSON string)
                     raw_args = func.get("arguments", "{}")
                     if isinstance(raw_args, str):
@@ -248,10 +280,10 @@ class BaseAgent(ABC):
                             tool_args = {}
                     else:
                         tool_args = raw_args
-                    
+
                     self.logger.info(f"MCP tools/call: {tool_name}({tool_args})")
                     self.stream_output(f"  → MCP tools/call: {tool_name}")
-                    
+
                     # Execute via MCP tools/call
                     mcp_call = MCPToolCall(
                         name=tool_name,
@@ -259,17 +291,17 @@ class BaseAgent(ABC):
                         call_id=tc_id,
                     )
                     mcp_result: MCPToolResult = self.tool_registry.call_tool(mcp_call)
-                    
+
                     result_text = mcp_result.get_text()
                     if mcp_result.is_error:
                         self.stream_output(f"  ✗ Tool error: {result_text[:100]}")
                     else:
                         self.stream_output(f"  ✓ Tool returned {len(result_text)} chars")
-                    
+
                     # Add MCP tool result to conversation as a tool message
                     # (bridges MCP result back into LLM conversation format)
                     messages.append(mcp_result.to_llm_tool_result())
-            
+
             # Exhausted tool rounds — make one final call without tools
             self.logger.warning(f"Exhausted {max_tool_rounds} tool-call rounds, making final call without tools")
             self.stream_output(f"Tool loop limit reached ({max_tool_rounds} rounds), getting final response...")
@@ -279,78 +311,102 @@ class BaseAgent(ABC):
                 tools=None,
             )
             return response.get("content", "")
-            
+
         except Exception as e:
             self.logger.error(f"LLM call failed: {e}")
             return f"[Error: {str(e)}]"
 
-    def create_task_complete_message(
+    def create_completed_task(
         self,
-        receiver: str,
-        result: Dict[str, Any],
-        in_reply_to: Optional[str] = None,
-    ) -> A2AMessage:
+        task: Task,
+        result_data: Dict[str, Any],
+        result_text: str = "",
+    ) -> Task:
         """
-        Create a task completion message.
-        
-        Args:
-            receiver: ID of the receiving agent
-            result: Task result data
-            in_reply_to: Optional message ID being replied to
-            
-        Returns:
-            Task complete message
-        """
-        return A2AMessage(
-            message_type=MessageType.TASK_COMPLETE,
-            sender=self.agent_id,
-            receiver=receiver,
-            payload=result,
-            in_reply_to=in_reply_to,
-        )
+        Mark a task as completed with result artifacts.
 
-    def create_error_message(
-        self,
-        receiver: str,
-        error: str,
-        in_reply_to: Optional[str] = None,
-    ) -> A2AMessage:
-        """
-        Create an error message.
-        
+        Per A2A Protocol: Updates the task state to COMPLETED and adds
+        an Artifact containing the result.
+
         Args:
-            receiver: ID of the receiving agent
-            error: Error description
-            in_reply_to: Optional message ID being replied to
-            
+            task: The task to complete
+            result_data: Structured result data
+            result_text: Optional text description of the result
+
         Returns:
-            Error message
+            Updated task in COMPLETED state
         """
-        return A2AMessage(
-            message_type=MessageType.ERROR,
-            sender=self.agent_id,
-            receiver=receiver,
-            payload={"error": error},
-            in_reply_to=in_reply_to,
+        # Add result as an A2A Artifact
+        artifact = Artifact.create_data_artifact(
+            data=result_data,
+            name=f"{self.agent_id}_result",
+            description=result_text or f"Result from {self.agent_id}",
         )
+        task.add_artifact(artifact)
+
+        # Add completion message to task history
+        response_msg = Message.create_agent_message(
+            text=result_text or f"Task completed by {self.agent_id}",
+            data=result_data,
+            sender=self.agent_id,
+            task_id=task.id,
+        )
+        task.add_to_history(response_msg)
+        self.send_message(response_msg)
+
+        # Update task state
+        task.update_state(TaskState.COMPLETED, message=f"Completed by {self.agent_id}")
+        return task
+
+    def create_failed_task(
+        self,
+        task: Task,
+        error: str,
+    ) -> Task:
+        """
+        Mark a task as failed with error information.
+
+        Per A2A Protocol: Updates the task state to FAILED and adds
+        an error message to the history.
+
+        Args:
+            task: The task to fail
+            error: Error description
+
+        Returns:
+            Updated task in FAILED state
+        """
+        # Add error message to task history
+        error_msg = Message.create_agent_message(
+            text=f"Error: {error}",
+            data={"error": error},
+            sender=self.agent_id,
+            task_id=task.id,
+        )
+        task.add_to_history(error_msg)
+        self.send_message(error_msg)
+
+        # Update task state
+        task.update_state(TaskState.FAILED, message=error)
+        return task
 
     def parse_json_from_llm(self, llm_response: str) -> Optional[Dict[str, Any]]:
         """
         Parse JSON from LLM response, handling markdown code blocks and malformed JSON.
-        
+
         Args:
             llm_response: Raw LLM response text
-            
+
         Returns:
             Parsed JSON dictionary or None if parsing fails
         """
         if not llm_response or llm_response.startswith("[Error:"):
             self.logger.warning("LLM response is empty or error")
             return None
-        
+
         # Log response length for debugging
         self.logger.debug(f"LLM response length: {len(llm_response)} chars")
-        
+
         # CHECK FOR TRUNCATION FIRST - before trying to extract nested objects
         # Look for signs of truncation: incomplete strings, unclosed structures, etc.
         is_truncated = any([
@@ -359,37 +415,37 @@ class BaseAgent(ABC):
             llm_response.count('[') > llm_response.count(']'),
             llm_response.count('"') % 2 != 0,  # Odd number of quotes
         ])
-        
+
         if is_truncated:
             self.logger.warning("Response appears truncated - attempting repair FIRST")
             repaired = self._attempt_json_repair(llm_response)
             if repaired:
                 self.logger.info("Successfully repaired and parsed truncated JSON")
                 return repaired
-        
+
         # Try to extract JSON from markdown code blocks
         # Look for ```json or ``` code fences
         code_fence_pattern = r'```(?:json)?\s*\n(.*?)(?:\n```|$)'
         code_matches = re.findall(code_fence_pattern, llm_response, re.DOTALL)
-        
+
         if code_matches:
             self.logger.debug(f"Found {len(code_matches)} code fence blocks")
             for i, json_str in enumerate(code_matches):
                 json_str = json_str.strip()
                 if not json_str:
                     continue
-                    
+
                 self.logger.debug(f"Attempting to parse code fence block {i+1}")
                 parsed = self._try_parse_json(json_str)
                 if parsed:
                     self.logger.info(f"Successfully parsed JSON from code fence block {i+1}")
                     return parsed
-        
+
         # Try to find JSON object in the response (look for outermost braces)
         # Use non-greedy match to find first complete JSON object
         json_object_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
         json_matches = re.findall(json_object_pattern, llm_response, re.DOTALL)
-        
+
         if json_matches:
             self.logger.debug(f"Found {len(json_matches)} potential JSON objects")
             # Try the longest match first (likely to be the complete JSON)
@@ -398,24 +454,24 @@ class BaseAgent(ABC):
                 if parsed:
                     self.logger.info("Successfully parsed JSON object from response")
                     return parsed
-        
+
         # If no pattern worked, try parsing the entire response
         parsed = self._try_parse_json(llm_response)
         if parsed:
             self.logger.info("Successfully parsed entire response as JSON")
             return parsed
-        
+
         self.logger.warning(f"Failed to parse JSON from LLM response (tried all methods)")
         self.logger.debug(f"Response preview: {llm_response[:500]}...")
         return None
-    
+
     def _try_parse_json(self, json_str: str) -> Optional[Dict[str, Any]]:
         """
         Attempt to parse a JSON string, with basic error handling.
-        
+
         Args:
             json_str: String that might contain JSON
-            
+
         Returns:
             Parsed dictionary or None if parsing fails
         """
@@ -429,19 +485,19 @@ class BaseAgent(ABC):
         except json.JSONDecodeError as e:
             self.logger.debug(f"JSON parse error: {e}")
             return None
-    
+
     def _attempt_json_repair(self, json_str: str) -> Optional[Dict[str, Any]]:
         """
         Attempt to repair truncated JSON by closing open structures.
-        
+
         Args:
             json_str: Potentially truncated JSON string
-            
+
         Returns:
             Parsed dictionary or None if repair fails
         """
         original_str = json_str
-        
+
         # Try to extract JSON from markdown code fences first
         code_fence_match = re.search(r'```(?:json)?\s*\n(.*?)(?:\n```|$)', json_str, re.DOTALL)
         if code_fence_match:
@@ -451,7 +507,7 @@ class BaseAgent(ABC):
             json_str = re.sub(r'^```(?:json)?\s*\n', '', json_str)
             json_str = re.sub(r'\n```\s*$', '', json_str)
             json_str = json_str.strip()
-        
+
         # Count unclosed braces and brackets (but ignore those inside strings)
         # Properly track escape sequences and find safe truncation points
         in_string = False
@@ -461,20 +517,20 @@ class BaseAgent(ABC):
         depth_stack = []  # Track { and [ positions
         last_comma_at_depth = {}  # Track last comma at each depth level
         current_depth = 0
-        
+
         for idx, char in enumerate(json_str):
             if escape_next:
                 escape_next = False
                 continue
-            
+
             if char == '\\':
                 escape_next = True
                 continue
-            
+
             if char == '"':
                 in_string = not in_string
                 continue
-            
+
             if not in_string:
                 if char == '{':
                     open_braces += 1
@@ -497,31 +553,28 @@ class BaseAgent(ABC):
                 elif char == ',':
                     # Track commas at each depth - these are safe truncation points
                     last_comma_at_depth[current_depth] = idx
-        
+
         if open_braces > 0 or open_brackets > 0 or in_string:
             self.logger.debug(f"Attempting repair: {open_braces} unclosed braces, {open_brackets} unclosed brackets, in_string={in_string}")
-            
+
             # Strategy 1: Try to find the last comma and truncate there
-            # This gives us the last complete key-value pair in an object/array
             best_truncation = -1
             if last_comma_at_depth:
-                # Find the deepest comma (most specific truncation point)
                 for depth in sorted(last_comma_at_depth.keys(), reverse=True):
                     best_truncation = last_comma_at_depth[depth]
                     self.logger.debug(f"Found comma at depth {depth}, index {best_truncation}")
                     break
-            
+
             if best_truncation > 0:
-                # Try truncating before the last comma
                 truncated = json_str[:best_truncation].rstrip()
                 self.logger.debug(f"Truncating at last comma: '{truncated[-50:]}'...")
-                
+
                 # Recount structures in truncated string
                 in_str = False
                 esc_next = False
                 o_braces = 0
                 o_brackets = 0
-                
+
                 for char in truncated:
                     if esc_next:
                         esc_next = False
@@ -541,43 +594,42 @@ class BaseAgent(ABC):
                             o_brackets += 1
                         elif char == ']':
                             o_brackets -= 1
-                
+
                 # Close the truncated structures
                 repaired = truncated
                 if in_str:
                     repaired += '"'
                 repaired += '}' * o_braces
                 repaired += ']' * o_brackets
-                
+
                 parsed = self._try_parse_json(repaired)
                 if parsed:
                     self.logger.info("Successfully repaired JSON by truncating at last comma")
                     return parsed
-            
+
             # Strategy 2: Simple closure - just close what's open
             repaired = json_str
-            
+
             # If we're inside a string, close it
             if in_string:
                 repaired += '"'
-            
+
             # Remove trailing commas before closing structures
             repaired = re.sub(r',\s*$', '', repaired)
-            
+
             # Close open structures in the correct order
             repaired += '}' * open_braces
             repaired += ']' * open_brackets
-            
+
             # Try to parse the repaired JSON
             parsed = self._try_parse_json(repaired)
             if parsed:
                 self.logger.info("Successfully repaired JSON by closing open structures")
                 return parsed
-            
+
             # Strategy 3: Remove incomplete lines progressively
             lines = json_str.split('\n')
             if len(lines) > 1:
-                # Try removing progressively more lines until we get valid JSON
                 for i in range(len(lines) - 1, max(0, len(lines) - 5), -1):
                     truncated = '\n'.join(lines[:i])
                     # Recount structures
@@ -585,7 +637,7 @@ class BaseAgent(ABC):
                     escape_next = False
                     open_braces = 0
                     open_brackets = 0
-                    
+
                     for char in truncated:
                         if escape_next:
                             escape_next = False
@@ -605,7 +657,7 @@ class BaseAgent(ABC):
                                 open_brackets += 1
                             elif char == ']':
                                 open_brackets -= 1
-                    
+
                     # Close the structures
                     repaired = truncated
                     if in_string:
@@ -613,10 +665,10 @@ class BaseAgent(ABC):
                     repaired = re.sub(r',\s*$', '', repaired)
                     repaired += ']' * open_brackets
                     repaired += '}' * open_braces
-                    
+
                     parsed = self._try_parse_json(repaired)
                     if parsed:
                         self.logger.info(f"Successfully repaired by removing {len(lines) - i} incomplete lines")
                         return parsed
-        
+
         return None
